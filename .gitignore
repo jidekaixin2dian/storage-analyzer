@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.server-url.txt
+*.server-crash.log
+storage_scan*.json
+storage_analysis.json
+storage_analysis.server-url.txt
+storage_analysis.server-crash.log
+*.html.report
