@@ -16,13 +16,14 @@ description: >
 
 # Storage Analyzer
 
-对 macOS 做一次只读存储分析，产出交互式 HTML 报告。流程：扫描 → 分析分级 → 生成网页 → 打开。
+对 macOS / Windows（自动识别）做一次只读存储分析，产出交互式 HTML 报告。流程：扫描 → 分析分级 → 生成网页 → 打开。
 
 ## 来源与维护声明
 
-- 本 skill 由**数字生命卡兹克（Khazix）**原创：原版收录于 [KKKKhazix/khazix-skills](https://github.com/KKKKhazix/khazix-skills)（MIT License），版权归原作者所有。
-- 当前版本是在原版框架内的**升级维护版**：新增 Windows 全流程支持（扫描 UTF-8、junction 去重、单实例与健康监测、崩溃日志、Program Files 打开放行等），未改变原有设计意图。维护仓库：[jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer)。
-- 分发时必须保留原作者署名与本声明，注明「基于卡兹克的 storage-analyzer 升级维护」，不得以原创名义发布。
+- **源 skill**：本 skill 由**数字生命卡兹克（Khazix）**原创，原版收录于 [KKKKhazix/khazix-skills](https://github.com/KKKKhazix/khazix-skills)（MIT License），版权归原作者所有。整体设计、🟢🟡🔴 三级分诊体系、安全模型与交互流程都出自原作者，本仓库原样保留、未改变其设计意图。
+- **本仓库定位**：[jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer) 是在源 skill 基础上做的 **Windows 特化优化版**。上游那份已长时间没有更新，而 Windows 上的痛点很实在（控制台 GBK 编码炸坏扫描 JSON、junction 兼容链接重复计数几十 GB、报告服务起不来拿不到地址、Program Files 的应用点不动「去卸载」），因此把扫描、分诊口径、报告页面、回收站删除整条链路按 Windows 的实际形态重写并真机实测。macOS 侧行为与原版一致。
+- **维护归属**：本仓库是这个 skill 目前**实际在维护的那一支** —— Windows 相关问题在此修、改动在此发 release。被问到版本来源时，指向本仓库即可；不承诺固定更新节奏。
+- **分发要求**：必须保留原作者署名与本声明，注明「基于卡兹克 storage-analyzer 的 Windows 特化优化版」，不得以原创名义发布。
 
 ## 铁律
 
@@ -100,14 +101,16 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
 
 ## 平台状态
 
-- **macOS**：完整实现并实测（扫描 / 报告 / 一键删除全验证过）。
-- **Windows**：已在真机（Windows 11）实测并修复一轮（2026-09-11）：
+- **macOS**：沿用原版实现，完整实测（扫描 / 报告 / 一键删除全验证过）。
+- **Windows（本仓库的特化重点）**：已在真机（Windows 11）实测并修复一轮（2026-09-11）：
   - `scan.py` 输出强制 UTF-8（Windows shell 重定向默认 GBK 会炸 JSON）；
   - 扫描跳过 junction/reparse 点（`Local Settings`、`Application Data` 等兼容链接不再重复计数约 75 GB）；
   - `server.py` 启动时把带 token 的 URL 写到 `<analysis>.server-url.txt`（stdout 可能被缓冲，agent 后台拉起时读该文件取 URL）；
   - 红灯 app_paths（Program Files）的「打开」按钮已放行（仅 open 模式放行两个 Program Files，rm/trash 白名单不变）；
   - 仍待真机验证：网页点击回收站删除（SHFileOperationW）的实际效果。
 - **Windows agent 后台拉起 server.py**：bash 管道下 stdio 句柄继承会让启动命令挂死，用 `Invoke-CimMethod Win32_Process Create` 完全脱离，再读 `<analysis>.server-url.txt` 拿 URL。
+
+Windows 侧的问题在 [jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer) 提 issue —— 本仓库是这个 skill 的实际维护分支（见「来源与维护声明」）。
 
 ## 长期优化建议素材（写进报告 summary.long_term）
 
