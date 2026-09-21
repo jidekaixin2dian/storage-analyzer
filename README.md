@@ -13,7 +13,7 @@
 | 平台 | 状态 |
 | --- | --- |
 | macOS | 沿用原版实现，扫描 / 报告 / 一键删除均已实测 |
-| Windows | 本仓库特化，整条链路已在 Windows 11 真机实测（2026-09）；网页回收站删除（`SHFileOperationW`）已实现，真机复验仍在补 |
+| Windows | 本仓库特化，整条链路已在 Windows 11 真机实测（2026-09），含网页回收站删除（`SHFileOperationW`，2026-09-21 复验通过） |
 
 ## 它做什么
 
@@ -55,7 +55,7 @@ python scripts/server.py storage_analysis.json
 - **扫描**：输出强制 UTF-8（Windows shell 重定向默认 GBK，会直接把 JSON 炸掉）；跳过 junction/reparse 点（`Local Settings`、`Application Data` 等兼容链接不再被重复计数，实测能差出几十 GB）
 - **报告服务**：启动时把带 token 的 URL 写入 `<analysis>.server-url.txt`（stdout 被缓冲时 agent 也能拿到地址）；同一份分析 JSON 已有存活实例时自动复用（单实例，不再产生指向死端口的标签页）；线程内未捕获异常落盘 `<analysis>.server-crash.log`
 - **页面**：服务健康心跳与状态灯、服务断开时的红色横幅指引、Windows 红灯 app_paths（Program Files）的「打开去卸载」按钮放行、亮色分诊台视觉
-- **删除**：`SHFileOperationW` 走系统回收站（可逆）。已实现，Windows 真机复验仍在补 —— 这也是当前 Windows 侧最主要的已知待办
+- **删除**：`SHFileOperationW` 走系统回收站（可逆，清空回收站后才真正释放空间）—— 已在 Windows 11 真机复验通过（2026-09-21）
 
 详见 [SKILL.md](SKILL.md) 的「平台状态」与「来源与维护声明」。
 
