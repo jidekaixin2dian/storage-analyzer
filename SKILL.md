@@ -107,7 +107,7 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
   - 扫描跳过 junction/reparse 点（`Local Settings`、`Application Data` 等兼容链接不再重复计数约 75 GB）；
   - `server.py` 启动时把带 token 的 URL 写到 `<analysis>.server-url.txt`（stdout 可能被缓冲，agent 后台拉起时读该文件取 URL）；
   - 红灯 app_paths（Program Files）的「打开」按钮已放行（仅 open 模式放行两个 Program Files，rm/trash 白名单不变）；
-  - 仍待真机验证：网页点击回收站删除（SHFileOperationW）的实际效果。
+  - 网页点击回收站删除（SHFileOperationW）已真机复验通过（2026-09-21）：项目进系统回收站、可还原，清空回收站后才真正释放空间。
 - **Windows agent 后台拉起 server.py**：bash 管道下 stdio 句柄继承会让启动命令挂死，用 `Invoke-CimMethod Win32_Process Create` 完全脱离，再读 `<analysis>.server-url.txt` 拿 URL。
 
 Windows 侧的问题在 [jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer) 提 issue —— 本仓库是这个 skill 的实际维护分支（见「来源与维护声明」）。
