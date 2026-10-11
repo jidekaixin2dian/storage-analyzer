@@ -13,7 +13,7 @@
 | 平台 | 状态 |
 | --- | --- |
 | macOS | 沿用原版实现，扫描 / 报告 / 一键删除均已实测 |
-| Windows | 本仓库特化，整条链路已在 Windows 11 真机实测（2026-09），含网页回收站删除（`SHFileOperationW`，2026-09-21 复验通过） |
+| Windows | 本仓库特化，整条链路已在 Windows 11 真机实测，含网页回收站删除（`SHFileOperationW`，单文件与目录均复验通过） |
 
 ## 它做什么
 
@@ -28,6 +28,9 @@
 
 ```bash
 git clone https://github.com/jidekaixin2dian/storage-analyzer.git ~/.claude/skills/storage-analyzer
+
+# Windows（PowerShell）
+git clone https://github.com/jidekaixin2dian/storage-analyzer.git $env:USERPROFILE\.claude\skills\storage-analyzer
 ```
 
 依赖：Python 3.8+（仅标准库，零第三方依赖）。macOS 开箱即用；Windows 需已安装 Python 并在 PATH 中。
@@ -52,10 +55,12 @@ python scripts/server.py storage_analysis.json
 
 在真机（Windows 11）上撞出来并修掉的问题，全部落在代码与文档里，不是纸面适配：
 
-- **扫描**：输出强制 UTF-8（Windows shell 重定向默认 GBK，会直接把 JSON 炸掉）；跳过 junction/reparse 点（`Local Settings`、`Application Data` 等兼容链接不再被重复计数，实测能差出几十 GB）
+- **扫描**：三个脚本的输出全部强制 UTF-8（Windows shell 重定向默认 GBK，会直接把 JSON 炸掉）；跳过 junction/reparse 点（`Local Settings`、`Application Data` 等兼容链接不再被重复计数，实测能差出几十 GB）；补扫 `C:\$Recycle.Bin`，回收站聚合成一项参与分诊
 - **报告服务**：启动时把带 token 的 URL 写入 `<analysis>.server-url.txt`（stdout 被缓冲时 agent 也能拿到地址）；同一份分析 JSON 已有存活实例时自动复用（单实例，不再产生指向死端口的标签页）；线程内未捕获异常落盘 `<analysis>.server-crash.log`
 - **页面**：服务健康心跳与状态灯、服务断开时的红色横幅指引、Windows 红灯 app_paths（Program Files）的「打开去卸载」按钮放行、亮色分诊台视觉
-- **删除**：`SHFileOperationW` 走系统回收站（可逆，清空回收站后才真正释放空间）—— 已在 Windows 11 真机复验通过（2026-09-21）
+- **删除**：`SHFileOperationW` 走系统回收站（可逆，清空回收站后才真正释放空间）—— 单文件与整个目录都已在 Windows 11 真机复验通过
+- **页面文案**：按系统切换「废纸篓 / 回收站」「访达 / 资源管理器」，Windows 上不会再冒出「访达可恢复」
+- **安全**：`rm`/`trash` 的根目录校验收紧为只认 `$HOME`，`/Applications` 与 Program Files 只在非破坏性的 `open` 下放行
 
 详见 [SKILL.md](SKILL.md) 的「平台状态」与「来源与维护声明」。
 

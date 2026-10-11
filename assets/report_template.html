@@ -193,6 +193,7 @@
 const DATA = __REPORT_DATA__;
 const DELETE = __DELETE_CONFIG__; // null=静态只读报告；{token,endpoint}=server.py 提供一键删除
 const FM = (DATA.system && /win/i.test(DATA.system.os||'')) ? '资源管理器' : '访达'; // 文件管理器名，按系统
+const TW = (DATA.system && /win/i.test(DATA.system.os||'')) ? '回收站' : '废纸篓'; // 回收容器名，按系统
 
 // —— 服务健康监测：server.py 死掉/被替换时，页面给出明确指引而不是玄学 Failed to fetch ——
 function markServerDown(){
@@ -344,7 +345,7 @@ function renderGreen(items){
         </div>
         ${hasTrash?`<div class="del-actions" data-paths="${b64(it.trash_paths)}">
           <div class="del-row">
-            <button class="del-btn trash" onclick="doDelete(this,'trash')">移到废纸篓</button>
+            <button class="del-btn trash" onclick="doDelete(this,'trash')">移到${TW}</button>
             <button class="del-btn danger" onclick="doDelete(this,'rm')">直接删除</button>
             <span class="del-status"></span>
           </div>
@@ -361,7 +362,7 @@ function greenBatchActions(items){
   if(!DELETE) return '';
   if(!items.some(it => it.trash_paths && it.trash_paths.length)) return '';
   return `<span class="sec-actions">
-    <button class="del-btn trash" onclick="doBatch(this,'trash')">全部移废纸篓</button>
+    <button class="del-btn trash" onclick="doBatch(this,'trash')">全部移${TW}</button>
     <button class="del-btn danger" onclick="doBatch(this,'rm')">全部删除</button>
     <span class="del-status sec-status"></span>
   </span>`;
@@ -380,19 +381,19 @@ function doBatch(btn, mode){
     JSON.parse(decodeURIComponent(escape(atob(w.dataset.paths)))).forEach(p=>allPaths.push(p));
     const sz=w.closest('.item').querySelector('.item-size'); if(sz) gb+=parseGB(sz.textContent);
   });
-  const verb = mode==='rm' ? '直接删除（不可恢复）' : '移到废纸篓（可逆，清空后释放）';
+  const verb = mode==='rm' ? '直接删除（不可恢复）' : '移到' + TW + '（可逆，清空后释放）';
   const sizeStr = gb>0 ? `，约 ${gb.toFixed(1)} GB` : '';
   if(!confirm(`确认将这组 ${wraps.length} 项缓存全部${verb}？\n共 ${allPaths.length} 个路径${sizeStr}。`)) return;
   postAction(secActions, allPaths, mode).then(res=>{
     if(res.ok){
-      status.textContent = mode==='rm' ? `✓ 已删除 ${wraps.length} 项` : `✓ 已移 ${wraps.length} 项到废纸篓`;
+      status.textContent = mode==='rm' ? `✓ 已删除 ${wraps.length} 项` : `✓ 已移 ${wraps.length} 项到${TW}`;
       status.className='del-status sec-status ok';
       wraps.forEach(w=>{
         const item=w.closest('.item'); item.classList.add('cleaned');
         const badge=item.querySelector('.item-head .item-badge');
-        if(badge) badge.textContent = mode==='rm' ? '已删除' : '已移废纸篓';
+        if(badge) badge.textContent = mode==='rm' ? '已删除' : '已移' + TW;
         const ist=w.querySelector('.del-status');
-        if(ist){ ist.textContent = mode==='rm'?'✓ 已删除':'✓ 已移到废纸篓'; ist.className='del-status ok'; }
+        if(ist){ ist.textContent = mode==='rm'?'✓ 已删除':'✓ 已移到' + TW; ist.className='del-status ok'; }
         w.querySelectorAll('.del-btn.trash,.del-btn.danger').forEach(b=>b.remove());
       });
       secActions.querySelectorAll('.del-btn').forEach(b=>b.remove());
@@ -414,12 +415,12 @@ function postAction(wrap, paths, mode){
 function doDelete(btn, mode){
   const wrap = btn.closest('.del-actions');
   const paths = JSON.parse(decodeURIComponent(escape(atob(wrap.dataset.paths))));
-  const verb = mode==='rm' ? '直接删除（不可恢复）' : '移到废纸篓（访达可恢复）';
+  const verb = mode==='rm' ? '直接删除（不可恢复）' : '移到' + TW + '（' + FM + '可恢复）';
   if(!confirm(`确认${verb}以下 ${paths.length} 个路径？\n\n`+paths.join('\n'))) return;
   postAction(wrap, paths, mode).then(res=>{
     const status = wrap.querySelector('.del-status');
     if(res.ok){
-      status.textContent = mode==='rm' ? '✓ 已删除，空间已释放' : '✓ 已移到废纸篓（访达可恢复，清空后释放空间）';
+      status.textContent = mode==='rm' ? '✓ 已删除，空间已释放' : '✓ 已移到' + TW + '（' + FM + '可恢复，清空后释放空间）';
       status.className='del-status ok';
       wrap.querySelectorAll('.del-btn.trash,.del-btn.danger').forEach(b=>b.remove());
       // 折叠状态下也能看到：标题行打上徽标 + 整行变灰
@@ -427,7 +428,7 @@ function doDelete(btn, mode){
       if(item){
         item.classList.add('cleaned');
         const badge = item.querySelector('.item-head .item-badge');
-        if(badge) badge.textContent = mode==='rm' ? '已删除' : '已移废纸篓';
+        if(badge) badge.textContent = mode==='rm' ? '已删除' : '已移' + TW;
       }
     } else { status.textContent='✗ '+(res.error||'失败'); status.className='del-status err'; }
   });
@@ -447,7 +448,7 @@ const b64 = o => btoa(unescape(encodeURIComponent(JSON.stringify(o))));
 
 function renderYellow(items){
   if(!items||!items.length) return '';
-  const note = `<div class="sec-note">「在${FM}里打开」只查看、不删任何东西；「移到废纸篓」仅针对核实过的安全子路径，可逆。是否该删的完整判断依据：点开条目查看。</div>`;
+  const note = `<div class="sec-note">「在${FM}里打开」只查看、不删任何东西；「移到${TW}」仅针对核实过的安全子路径，可逆。是否该删的完整判断依据：点开条目查看。</div>`;
   const cards = items.map(it=>card('yellow', it.name, it.size, it.path,
     esc(it.content_profile),
     `<div class="field"><div class="label">为什么需要人工判断</div>${esc(it.why_manual)}</div>
@@ -461,7 +462,7 @@ function yellowActions(it){
   if(!DELETE) return '';
   const hasTrash = it.trash_paths && it.trash_paths.length;
   const trashBtn = hasTrash
-    ? `<button class="del-btn trash" onclick="doDelete(this,'trash')">移到废纸篓（安全部分）</button>` : '';
+    ? `<button class="del-btn trash" onclick="doDelete(this,'trash')">移到${TW}（安全部分）</button>` : '';
   return `<div class="field del-actions" data-paths="${hasTrash?b64(it.trash_paths):''}" data-open="${b64([it.path])}">
     <div class="del-row">
       <button class="del-btn open" onclick="doOpen(this)">在${FM}里打开</button>

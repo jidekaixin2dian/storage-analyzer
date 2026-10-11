@@ -1,7 +1,7 @@
 # Windows 数据布局与分级参考
 
 分析 Windows 扫描结果时读这份。讲"东西存在哪、怎么辨认、归哪一级"。
-注意：Windows 代码路径在 macOS 上无法验证，分析时对路径存在性保持谨慎。
+本仓库就是在 Windows 真机上开发并实测的，路径与删除链路已验证；分析时仍按扫描结果判断存在性，不要凭印象编路径。
 
 ## 多盘符
 
@@ -19,7 +19,7 @@ Windows 通常多个盘（C:、D:…）。磁盘总览会列出所有盘，但**
 | `%USERPROFILE%\.cache`、`.npm`、`.gradle`、`.m2`、`.nuget\packages`、`%LOCALAPPDATA%\pip\Cache`、`Yarn` | 开发缓存 | 🟢 |
 | `C:\Program Files`、`Program Files (x86)` | 应用本体 | 🔴 仅重复/想卸时上灯，否则归蓝色 |
 | `%USERPROFILE%\Downloads` 的安装包 | exe/msi 残留 | 🟢 |
-| `C:\$Recycle.Bin` | 回收站 | 🟡 提示用户清空 |
+| `C:\$Recycle.Bin`（扫描已聚合成 `recycle_bin` 组） | 用户自己删掉的东西 | 🟡 只给文字处置：设置 > 存储 > 临时文件、`cleanmgr`、资源管理器右键清空。它在 HOME 外，**不要填进 `path`/`trash_paths`**，白名单会拒、按钮是死的 |
 
 ## 系统占用（不上灯，归蓝色"系统及其他"，间接释放写 long_term）
 

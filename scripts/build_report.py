@@ -32,6 +32,9 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+    # Windows 管道/重定向下 stdout 默认走 GBK，中文提示会让调用方解码失败（与 scan.py/server.py 一致）
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     src = sys.argv[1]
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser(
         "~/Desktop/storage-report.html")
@@ -48,7 +51,8 @@ def main():
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"报告已生成: {out}")
-    print(f"打开: open '{out}'")
+    opener = "start" if sys.platform.startswith("win") else "open"
+    print(f"打开: {opener} '{out}'")
 
 
 if __name__ == "__main__":

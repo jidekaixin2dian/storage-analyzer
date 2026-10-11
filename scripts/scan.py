@@ -153,7 +153,7 @@ def scan_macos():
 
 
 # ======================================================================
-# Windows  (UNTESTED on this build — stdlib only: os, shutil, ctypes)
+# Windows  (真机实测：Windows 11 + Python 3.12，纯标准库 os / shutil / ctypes)
 # ======================================================================
 def dir_size_bytes(path):
     """Recursive size in bytes via os.scandir. Skips symlinks/junctions and unreadable."""
@@ -230,6 +230,25 @@ def list_drives_windows():
     return drives
 
 
+def recycle_bin_windows(sysdrive, min_kb=51200):
+    """回收站占用，聚合成一项（只读）。
+
+    各用户 SID 子目录单独看没有意义，合并成一个「回收站」条目更好分诊：
+    它恒为 🟡 —— 清空才真正释放，且里面装的是用户自己删掉的东西。
+    """
+    base = os.path.join(sysdrive, "$Recycle.Bin")
+    if not os.path.isdir(base):
+        return []
+    try:
+        children = [e.path for e in os.scandir(base) if e.is_dir(follow_symlinks=False)]
+    except (PermissionError, OSError):
+        return [{"name": "回收站", "path": base, "size_kb": 0, "size_h": "?", "denied": True}]
+    kb = sum(dir_size_bytes(d) for d in children) // 1024
+    if kb < min_kb:
+        return []
+    return [{"name": "回收站", "path": base, "size_kb": kb, "size_h": human(kb)}]
+
+
 def system_info_windows():
     import platform
     info = {}
@@ -257,6 +276,7 @@ def scan_windows():
     profile = os.environ.get("USERPROFILE", HOME)
     local = os.environ.get("LOCALAPPDATA", os.path.join(profile, "AppData", "Local"))
     roaming = os.environ.get("APPDATA", os.path.join(profile, "AppData", "Roaming"))
+    sysdrive = os.environ.get("SystemDrive", "C:") + "\\"
     targets = [
         ("user_profile", profile, 102400),
         ("appdata_local", local, 51200),
@@ -292,6 +312,7 @@ def scan_windows():
                     "path": path, "size_kb": kb, "size_h": human(kb)})
     dev.sort(key=lambda r: r["size_kb"], reverse=True)
     groups["dev_caches"] = dev
+    groups["recycle_bin"] = recycle_bin_windows(sysdrive)
     return system_info_windows(), groups
 
 

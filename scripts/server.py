@@ -13,6 +13,10 @@ SAFETY MODEL — read before changing:
   accepted. Every request path is realpath-resolved and must be in the allowlist
   AND under $HOME. Anything else is rejected. This is the core guard — the
   endpoint cannot be used to delete arbitrary files.
+- One deliberate exception: mode "open" (non-destructive, reveals the folder in
+  Finder/Explorer) additionally allows /Applications on macOS and the two
+  Program Files roots on Windows, because app binaries live outside $HOME.
+  The rm/trash allowlists never gain those roots.
 - Bound to 127.0.0.1 only; every POST requires the session token; Host header
   must be 127.0.0.1 (blocks DNS-rebinding from a malicious page).
 - Two modes: "trash" (Finder -> Trash, reversible) and "rm" (immediate,
@@ -66,7 +70,8 @@ def load(src):
             rp = expand(it["path"])
             if os.path.exists(rp):
                 open_allow.add(rp)
-    # 红灯只允许"打开"（应用本体在 /Applications，删除让用户在访达里自己卸）
+    # 红灯只允许"打开"（应用本体在 /Applications 或 Program Files，
+    # 删除让用户在访达/资源管理器里自己走正规卸载）
     for it in data.get("red", []):
         for p in (it.get("app_paths") or []):
             rp = expand(p)
@@ -97,7 +102,8 @@ def _trash_macos(path):
 
 def _trash_windows(path):
     # Send to Recycle Bin via SHFileOperationW with FOF_ALLOWUNDO (stdlib ctypes).
-    # UNTESTED on this build — verify on a real Windows machine.
+    # Verified on a real Windows 11 machine: both single files and whole
+    # directories land in the Recycle Bin and stay restorable.
     import ctypes
     from ctypes import wintypes
 
@@ -213,13 +219,15 @@ class Handler(BaseHTTPRequestHandler):
             if rp not in allow:
                 self._send(403, json.dumps({"ok": False, "error": "路径不在白名单：%s" % p}))
                 return
-            # 二级护栏：只允许用户目录或 /Applications（后者仅 open 用，删除白名单不含它）
-            roots = (HOME, "/Applications")
-            if mode == "open" and sys.platform.startswith("win"):
-                # Windows 红灯 app_paths 指向 Program Files（应用本体不在 HOME），
-                # open 为非破坏性操作，放行两个 Program Files；rm/trash 白名单不受影响
-                roots = roots + (os.environ.get("ProgramFiles", r"C:\Program Files"),
-                                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+            # 二级护栏：rm/trash 只允许用户目录；"打开"（非破坏性）额外放行应用本体所在目录
+            roots = (HOME,)
+            if mode == "open":
+                roots += ("/Applications",)
+                if sys.platform.startswith("win"):
+                    # Windows 红灯 app_paths 指向 Program Files（应用本体不在 HOME），
+                    # 仅在 open 下放行两个 Program Files，rm/trash 依旧够不到
+                    roots += (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                              os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
             if not any(rp == base or rp.startswith(base + os.sep) for base in roots):
                 self._send(403, json.dumps({"ok": False, "error": "路径越界：%s" % p}))
                 return

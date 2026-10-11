@@ -27,7 +27,7 @@ description: >
 
 ## 铁律
 
-- **全程只读。** 只能跑扫描/统计/列目录/读元信息（df、du、diskutil、stat、ls）。绝对禁止 rm、mv、rmdir、清空回收站、改权限等任何写操作。
+- **全程只读。** 只能跑扫描/统计/列目录/读元信息。macOS 用 df、du、diskutil、stat、ls；Windows 用 `scan.py`、`Get-ChildItem`、`Get-PSDrive`、`wmic logicaldisk` 这类只读命令。绝对禁止任何写操作：rm、mv、rmdir、`Remove-Item`、`rd /s`、`Clear-RecycleBin`、清空回收站、改权限、动注册表，一律不行。
 - **删除命令只展示，不执行。** 报告里给出的清理命令是供用户自己在终端确认后运行的。即使用户在对话里说"帮我删"，也要先停下确认（命中全局红线：删除文件必须先问），不要直接代跑。
 - **估算标注清楚。** 涉及"可释放空间"一律说明是估算值。
 - **路径、命令保留原文不翻译。**
@@ -37,24 +37,30 @@ description: >
 ### Step 1 扫描（只读）
 
 ```bash
+# macOS / Linux
 python3 scripts/scan.py > /tmp/storage_scan.json
 ```
+```powershell
+# Windows：没有 /tmp，命令也是 python 或 py -3（不是 python3）
+py -3 scripts\scan.py > "$env:TEMP\storage_scan.json"
+```
+后文示例统一写 `/tmp/...`，Windows 上换成 `$env:TEMP\...`。
 
 `scan.py` 自动识别系统（`sys.platform`）：
 - **macOS**：扫 home、library、caches、containers、group_containers、app_support、applications、downloads、dev_caches，用 `du` 算大小。
-- **Windows**：扫 user_profile、appdata_local、appdata_roaming、temp、downloads、program_files(_x86)、dev_caches，用 `os.scandir` 算大小；`system.disks` 含所有盘符。
+- **Windows**：扫 user_profile、appdata_local、appdata_roaming、temp、downloads、program_files(_x86)、dev_caches、recycle_bin（`C:\$Recycle.Bin` 各用户子目录聚合成一项），用 `os.scandir` 算大小；`system.disks` 含所有盘符。
 
 输出 JSON：`system`（系统/磁盘信息，含 `disk_name` 主盘名 + `disks` 全部盘）+ `groups`（各组子目录大小，已降序、过滤 50MB 以下）。扫描较慢，耐心等。读不到的目录标 `denied`，需在报告里列出并提示遗漏体量。
 
 ### Step 2 分析与分级
 
-先看 `system.os` 判断系统，读对应的数据布局参考：macOS 读 [references/macos.md](references/macos.md)，Windows 读 [references/windows.md](references/windows.md)（讲该系统东西存哪、怎么辨认、归哪一级）。然后读 `/tmp/storage_scan.json` 做这几件事：
+先看 `system.os` 判断系统，读对应的数据布局参考：macOS 读 [references/macos.md](references/macos.md)，Windows 读 [references/windows.md](references/windows.md)（讲该系统东西存哪、怎么辨认、归哪一级）。然后读扫描 JSON 做这几件事：
 
 1. **挑 Top 5** 占用大户，判定类型（系统资产/应用本体/应用数据/应用缓存/开发缓存/用户文件/媒体内容/下载内容/虚拟机镜像/回收站/其他）。
 2. **识别"神秘大目录"**：UUID 命名的 Container、不明的隐藏目录，要追查它属于哪个 App、装的是什么（例如某 97GB 的 UUID Container 实为 Bilibili 离线视频缓存）。必要时 `ls`/`du` 深入一层看清楚，但仍只读。
 3. **三级分类 = 清理决策清单，不是全盘点。** 只把"存在'要不要动它'这个决策"的项放进三灯；日常在用的正常应用、操作系统本身、海量零碎小文件没有清理决策，不进三灯，它们落在磁盘条的蓝色"系统及其他"里。判定标准：
    - 🟢 **可自动清理**：纯缓存、临时文件、安装包残留、明确可再生且不影响功能、不丢用户数据（pip/uv/npm/Xcode DerivedData 等开发缓存、浏览器缓存）。
-   - 🟡 **需人工判断**：含用户数据或有判断成本（离线视频、文档、项目代码 node_modules、聊天记录、设计稿）。给内容画像 + 至少 3 句处置路径（应用内清理 / 系统工具 / 文件管理器手动审查，三选最合适）+ 风险提示。**所有橙灯项在服务模式下自动有「在访达/资源管理器打开」按钮**（跳过去自己审查删）；如果该项有一个核实过、删了不破坏 App 的安全子路径（如 B站离线视频的 `.Downloads` 目录、旧备份目录），给它 `trash_paths` → 网页出现「移到废纸篓」按钮（橙灯只准移废纸篓、可逆，绝不给"直接删除"）。App 托管又无安全子路径的（Chrome/微信）只给打开按钮、不给 trash_paths。按钮下方会自动写明注意事项（打开只查看不删、移废纸篓可逆需清空才释放等）；如果某项在文件管理器里是 App 内部格式、不方便手动挑选，给它一个 `open_note` 字段做客观说明（会显示在注意事项里）。**口吻要中性、像产品说明**：直接描述"这里是什么结构、为什么不好手动删、想精细操作该去哪"，不要写成"我发现/提醒注意/看着像没视频"这种暴露开发者踩坑视角的话。
+   - 🟡 **需人工判断**：含用户数据或有判断成本（离线视频、文档、项目代码 node_modules、聊天记录、设计稿）。给内容画像 + 至少 3 句处置路径（应用内清理 / 系统工具 / 文件管理器手动审查，三选最合适）+ 风险提示。**所有橙灯项在服务模式下自动有「在访达/资源管理器打开」按钮**（跳过去自己审查删）；如果该项有一个核实过、删了不破坏 App 的安全子路径（如 B站离线视频的 `.Downloads` 目录、旧备份目录），给它 `trash_paths` → 网页出现「移到废纸篓」按钮（橙灯只准移废纸篓、可逆，绝不给"直接删除"）。App 托管又无安全子路径的（Chrome/微信）只给打开按钮、不给 trash_paths。Windows 的回收站（`recycle_bin` 组）恒归 🟡，而且**只给文字处置**（设置 > 系统 > 存储 > 临时文件、`cleanmgr`、资源管理器里右键清空回收站）：不要把 `C:\$Recycle.Bin` 写进 `path` 或 `trash_paths`，它在 HOME 外，白名单与越界校验一定会拒，给了按钮就是死按钮。按钮下方会自动写明注意事项（打开只查看不删、移废纸篓可逆需清空才释放等）；如果某项在文件管理器里是 App 内部格式、不方便手动挑选，给它一个 `open_note` 字段做客观说明（会显示在注意事项里）。**口吻要中性、像产品说明**：直接描述"这里是什么结构、为什么不好手动删、想精细操作该去哪"，不要写成"我发现/提醒注意/看着像没视频"这种暴露开发者踩坑视角的话。
    - 🔴 **谨慎清理（有决策但不建议手删）**：你可能想动、但建议别手删的具体项——重复安装的应用、想卸载的大应用、运行中应用的核心数据等。给"为什么不建议手删" + `indirect_release` 写**具体卸载步骤**（自带卸载器 / 启动台长按 / 右键移废纸篓 / AppCleaner 清残留 / App Store 可重装等，要可照做不是空话）。应用项给 `app_paths`（真实 `.app` 绝对路径数组）→ 网页出现「在文件管理器打开（去卸载）」按钮，定位到 App 让用户自己正规卸载。**红灯不给删除/卸载按钮**（应用在系统目录、可能要管理员密码、可能有自带卸载器和残留，后台代删不稳妥）。**纯系统文件、APFS 快照不要单独列红卡**（没有清理决策），归蓝色即可；系统层面的释放技巧（重启释 swap、Time Machine 快照策略、可清除空间自动回收）写进 `summary.long_term` 长期建议。
 
 每个 🟢 项要给：预估释放空间、清理前需关闭的进程、可一键复制的清理命令（用移到废纸篓或 App 自身清理入口的安全方式，谨慎用 `rm`；如用 `rm` 必须是明确的缓存子目录）。
@@ -71,11 +77,19 @@ python3 scripts/scan.py > /tmp/storage_scan.json
 ```bash
 python3 scripts/server.py /tmp/storage_analysis.json   # 自动开浏览器，Ctrl+C 停
 ```
-`server.py` 起在 127.0.0.1 + 随机端口 + 随机 token。🟢 项给「移到废纸篓」(可逆) +「直接删除」(立即释放、不可逆)；🟡 项给「在访达打开」+（有安全子路径时）「移到废纸篓」。**安全模型——三套白名单，权限从严到宽**：`rm` 只允许绿灯 `trash_paths`；`trash` 允许绿灯+橙灯 `trash_paths`（橙灯永远不能 rm）；`open`（在文件管理器打开，非破坏性）允许上述全部 + 橙灯真实 `path`。所有请求 realpath 校验 + 必须在 $HOME 内 + token + Host 校验，每次点击浏览器先 confirm。osascript/SHFileOperationW 入废纸篓，macOS 首次弹访达自动化授权点允许即可。
+```powershell
+py -3 scripts\server.py "$env:TEMP\storage_analysis.json"   # Windows 同上
+```
+`server.py` 起在 127.0.0.1 + 随机端口 + 随机 token。🟢 项给「移到废纸篓/回收站」(可逆) +「直接删除」(立即释放、不可逆)；🟡 项给「在访达/资源管理器打开」+（有安全子路径时）「移到废纸篓/回收站」（按钮文案按系统自动切换）。**安全模型——三套白名单，权限从严到宽**：`rm` 只允许绿灯 `trash_paths`；`trash` 允许绿灯+橙灯 `trash_paths`（橙灯永远不能 rm）；`open`（在文件管理器打开，非破坏性）允许上述全部 + 橙灯真实 `path`。所有请求 realpath 校验 + **rm/trash 只允许 $HOME 内**（`open` 才额外放行 `/Applications` 与 Program Files）+ token + Host 校验，每次点击浏览器先 confirm。osascript/SHFileOperationW 入废纸篓，macOS 首次弹访达自动化授权点允许即可。
 
 仅当用户明确只想要一份可分享/留存的只读文件时，才用静态模式（无删除按钮，因为 `file://` 打开的页面碰不到文件系统）：
 ```bash
 python3 scripts/build_report.py /tmp/storage_analysis.json ~/Desktop/storage-report.html && open ~/Desktop/storage-report.html
+```
+```powershell
+# Windows：start 代替 open，路径用 $env:USERPROFILE
+py -3 scripts\build_report.py "$env:TEMP\storage_analysis.json" "$env:USERPROFILE\Desktop\storage-report.html"
+start "$env:USERPROFILE\Desktop\storage-report.html"
 ```
 
 **排障：网页上没有删除/移废纸篓按钮** = 要么开的是静态报告（改用 `server.py`），要么 🟢 项漏了 `trash_paths`（补上重启服务）。**排障：点按钮报「连接失败」或顶部出现红色「服务已断开」横幅** = 该标签页对应的服务进程已关闭或被替换（旧标签页不会自动知道）。关闭旧标签页重开即可；`server.py` 对同一份分析 JSON 会自动复用存活实例（heartbeat 校验 mtime 一致），不会重复起服务；页面右下角状态灯每 8 秒监测一次服务健康。
@@ -107,7 +121,11 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
   - 扫描跳过 junction/reparse 点（`Local Settings`、`Application Data` 等兼容链接不再重复计数约 75 GB）；
   - `server.py` 启动时把带 token 的 URL 写到 `<analysis>.server-url.txt`（stdout 可能被缓冲，agent 后台拉起时读该文件取 URL）；
   - 红灯 app_paths（Program Files）的「打开」按钮已放行（仅 open 模式放行两个 Program Files，rm/trash 白名单不变）；
-  - 网页点击回收站删除（SHFileOperationW）已真机复验通过（2026-09-21）：项目进系统回收站、可还原，清空回收站后才真正释放空间。
+  - 网页点击回收站删除（SHFileOperationW）已真机复验通过：单文件和整个目录都能送进系统回收站、可还原，清空回收站后才真正释放空间；
+  - `build_report.py` 也补了强制 UTF-8（此前只有它的 stdout 还是 GBK，agent 管道捕获会解不开）；
+  - 扫描补 `recycle_bin` 组（`C:\$Recycle.Bin` 聚合），回收站不再漏在扫描范围外；
+  - 二级护栏收紧：rm/trash 的根目录只认 $HOME，`/Applications` 与 Program Files 仅在 `open` 下放行（此前 rm 也能拿到 /Applications）；
+  - 报告文案按系统切换「废纸篓/回收站」「访达/资源管理器」，Windows 上不再显示访达。
 - **Windows agent 后台拉起 server.py**：bash 管道下 stdio 句柄继承会让启动命令挂死，用 `Invoke-CimMethod Win32_Process Create` 完全脱离，再读 `<analysis>.server-url.txt` 拿 URL。
 
 Windows 侧的问题在 [jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer) 提 issue —— 本仓库是这个 skill 的实际维护分支（见「来源与维护声明」）。
