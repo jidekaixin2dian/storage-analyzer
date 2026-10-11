@@ -116,7 +116,7 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
 ## 平台状态
 
 - **macOS**：沿用原版实现，完整实测（扫描 / 报告 / 一键删除全验证过）。
-- **Windows（本仓库的特化重点）**：已在真机（Windows 11）实测并修复一轮（2026-09-11）：
+- **Windows（本仓库的特化重点）**：已在真机（Windows 11）多轮实测并修复（首轮记录 2026-09-11）：
   - `scan.py` 输出强制 UTF-8（Windows shell 重定向默认 GBK 会炸 JSON）；
   - 扫描跳过 junction/reparse 点（`Local Settings`、`Application Data` 等兼容链接不再重复计数约 75 GB）；
   - `server.py` 启动时把带 token 的 URL 写到 `<analysis>.server-url.txt`（stdout 可能被缓冲，agent 后台拉起时读该文件取 URL）；
