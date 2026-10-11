@@ -27,8 +27,10 @@
 把本仓库克隆到你的 agent skills 目录（以 Claude Code / pi 等支持 Agent Skills 的环境为例）：
 
 ```bash
+# macOS / Linux
 git clone https://github.com/jidekaixin2dian/storage-analyzer.git ~/.claude/skills/storage-analyzer
-
+```
+```powershell
 # Windows（PowerShell）
 git clone https://github.com/jidekaixin2dian/storage-analyzer.git $env:USERPROFILE\.claude\skills\storage-analyzer
 ```
