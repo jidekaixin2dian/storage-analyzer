@@ -52,6 +52,8 @@ py -3 scripts\scan.py --all-drives --progress --output "$env:TEMP\storage_scan_f
 ```
 
 `--output` 写新 UTF-8 文件并拒绝覆盖，避免旧版 PowerShell 重定向编码问题。`--progress` 只向 stderr 输出进度，stdout 的 JSON 保持干净。此模式跳过网络盘和 reparse/junction，不重复遍历热点目录；查看 `coverage` 中权限失败、跳过链接与各盘扫描数量。体积为逻辑文件大小，硬链接和压缩会使其与物理占用不同。没有权限读取的内容不能称为“已完整扫描”。
+
+用户授权管理员补扫时，按 [Windows 管理员只读补扫](references/windows.md#管理员只读补扫) 操作：通过 UAC 只提升扫描子进程，验证实际令牌和完成状态，保留前后结果，更新报告与覆盖说明；不修改 ACL，也不提升清理服务。
 后文示例统一写 `/tmp/...`，Windows 上换成 `$env:TEMP\...`。
 
 `scan.py` 自动识别系统（`sys.platform`）：
