@@ -15,7 +15,8 @@ SAFETY MODEL — read before changing:
   endpoint cannot be used to delete arbitrary files.
 - One deliberate exception: mode "open" (non-destructive, reveals the folder in
   Finder/Explorer) additionally allows /Applications on macOS and the two
-  Program Files roots on Windows, because app binaries live outside $HOME.
+  Program Files roots and local fixed volumes on Windows, because whole-machine
+  reports include applications and data outside $HOME.
   The rm/trash allowlists never gain those roots.
 - Bound to 127.0.0.1 only; every POST requires the session token; Host header
   must be 127.0.0.1 (blocks DNS-rebinding from a malicious page).
@@ -46,6 +47,16 @@ OPEN_ALLOW = set()
 
 def expand(p):
     return os.path.realpath(os.path.expanduser(p))
+
+
+def local_urlopen(url, timeout=2):
+    """Never route local heartbeat traffic or its URL through an HTTP proxy."""
+    import urllib.parse
+    import urllib.request
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost') or parsed.username or parsed.password:
+        raise ValueError('Heartbeat URL must be a local HTTP service')
+    return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout)
 
 
 def load(src):
@@ -199,11 +210,20 @@ class Handler(BaseHTTPRequestHandler):
         if host not in ("127.0.0.1", "localhost"):
             self._send(403, json.dumps({"ok": False, "error": "host 不被允许"}))
             return
-        n = int(self.headers.get("Content-Length", 0))
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            if not 0 < n <= 1024 * 1024:
+                raise ValueError('invalid request size')
+        except ValueError:
+            self._send(400, json.dumps({"ok": False, "error": "请求长度无效"}))
+            return
         try:
             req = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             self._send(400, json.dumps({"ok": False, "error": "请求格式错误"}))
+            return
+        if not isinstance(req, dict):
+            self._send(400, json.dumps({"ok": False, "error": "请求必须是对象"}))
             return
         if req.get("token") != TOKEN:
             self._send(403, json.dumps({"ok": False, "error": "token 校验失败"}))
@@ -213,8 +233,14 @@ class Handler(BaseHTTPRequestHandler):
         if allow is None:
             self._send(400, json.dumps({"ok": False, "error": "未知操作"}))
             return
-        done = []
-        for p in (req.get("paths") or []):
+        paths = req.get("paths")
+        if not isinstance(paths, list) or not paths or any(not isinstance(p, str) or not p for p in paths):
+            self._send(400, json.dumps({"ok": False, "error": "paths 必须是非空路径数组"}))
+            return
+        # Validate the ENTIRE batch before changing anything. An invalid second
+        # path must not leave the first path deleted behind a 403 response.
+        checked = []
+        for p in paths:
             rp = expand(p)
             if rp not in allow:
                 self._send(403, json.dumps({"ok": False, "error": "路径不在白名单：%s" % p}))
@@ -228,9 +254,19 @@ class Handler(BaseHTTPRequestHandler):
                     # 仅在 open 下放行两个 Program Files，rm/trash 依旧够不到
                     roots += (os.environ.get("ProgramFiles", r"C:\Program Files"),
                               os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-            if not any(rp == base or rp.startswith(base + os.sep) for base in roots):
+                    # Full-machine reports include data on other fixed volumes.
+                    # This extends OPEN only; destructive modes stay HOME-only.
+                    from scan_windows_full import fixed_drives
+                    roots += tuple(fixed_drives())
+            if not any(rp == base or rp.startswith(base.rstrip(os.sep) + os.sep) for base in roots):
                 self._send(403, json.dumps({"ok": False, "error": "路径越界：%s" % p}))
                 return
+            if mode != "open" and rp == HOME:
+                self._send(403, json.dumps({"ok": False, "error": "禁止删除用户目录根路径"}))
+                return
+            checked.append((p, rp))
+        done = []
+        for p, rp in checked:
             try:
                 if mode == "open":
                     open_in_file_manager(rp)
@@ -242,7 +278,7 @@ class Handler(BaseHTTPRequestHandler):
                     hard_delete(rp)
                 done.append(p)
             except Exception as e:
-                self._send(500, json.dumps({"ok": False, "error": str(e)}))
+                self._send(500, json.dumps({"ok": False, "error": str(e), "done": done, "failed": p}))
                 return
         self._send(200, json.dumps({"ok": True, "done": done}))
 
@@ -259,8 +295,7 @@ def main():
         try:
             with open(url_file, encoding="utf-8") as f:
                 prev = f.read().strip()
-            import urllib.request
-            with urllib.request.urlopen(prev + "heartbeat", timeout=2) as resp:
+            with local_urlopen(prev + "heartbeat", timeout=2) as resp:
                 info = json.load(resp)
             if info.get("ok") and info.get("mtime") == int(os.path.getmtime(sys.argv[1])):
                 print("已有实例在服务同一份分析：" + prev + "（复用，不再新起）", flush=True)
@@ -277,7 +312,7 @@ def main():
     print("绿灯可删 %d 项 | 橙灯可移废纸篓/打开文件夹 %d 项 | 页面上点" % (len(RM_ALLOW), len(TRASH_ALLOW) - len(RM_ALLOW)), flush=True)
     print("用完按 Ctrl+C 停止服务（服务关掉后按钮即失效）", flush=True)
     # Deterministic URL handoff for detached launches (agent contexts): the
-    # tokenized URL lands next to the analysis JSON regardless of stdout buffering.
+    # report URL lands next to the analysis JSON regardless of stdout buffering.
     try:
         with open(os.path.splitext(os.path.abspath(sys.argv[1]))[0] + ".server-url.txt",
                   "w", encoding="utf-8") as f:

@@ -45,6 +45,9 @@ git clone https://github.com/jidekaixin2dian/storage-analyzer.git $env:USERPROFI
 # 1. 只读扫描
 python scripts/scan.py > storage_scan.json
 
+# Windows 整机：实际遍历所有本地固定盘，输出覆盖诊断与进度
+python scripts/scan.py --all-drives --progress --output storage_scan_full.json
+
 # 2. Agent 读取扫描结果，产出三级分诊的 analysis JSON
 
 # 3. 起交互报告（自动打开浏览器）
@@ -52,6 +55,18 @@ python scripts/server.py storage_analysis.json
 ```
 
 报告页面右下角有服务健康状态灯（每 8 秒心跳），服务断开时页面会明确提示，而不是笼统的「Failed to fetch」。
+
+整机模式每盘只遍历一次，热点统计复用该次遍历；`coverage` 列出访问失败与跳过的 reparse/junction 数量，不把权限不足当成空目录。报告大小为逻辑文件长度，硬链接和压缩可能与物理占用不同。扫描本身不删除文件；只有用户明确要求清理时才处理核实过的目标。`.cache`、Temp 和已安装依赖不按名称整体清空。
+
+扫描支持 Windows 尾部空格/点与长路径，报告保留可读的原始名称；异常路径不据此自动删除。整机报告允许打开其他本地固定盘的精确白名单路径，但 rm/trash 仍限定 HOME 内，不能借「打开」扩大删除权限。
+
+删除服务会先检查整批路径再执行，禁止删除用户主目录根；实际 I/O 失败返回此前已完成的路径，便于安全接续。本机 heartbeat 不经过环境 HTTP 代理。Windows 与 macOS 共用的权限白名单、token 和 Host 校验继续保留。
+
+回归检查（纯标准库，测试仅操作临时合成文件）：
+
+```text
+python -m unittest discover -s scripts -p "test_*.py" -v
+```
 
 ## Windows 特化改了什么
 

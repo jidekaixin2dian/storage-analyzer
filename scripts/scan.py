@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 import time
+from scan_windows_full import api_path
 
 HOME = os.path.expanduser("~")
 
@@ -159,7 +160,7 @@ def dir_size_bytes(path):
     """Recursive size in bytes via os.scandir. Skips symlinks/junctions and unreadable."""
     total = 0
     try:
-        with os.scandir(path) as it:
+        with os.scandir(api_path(path)) as it:
             for e in it:
                 try:
                     if e.is_symlink():
@@ -183,28 +184,28 @@ def dir_size_bytes(path):
 
 def scandir_children(path, min_kb=51200, limit=40):
     """Size every immediate child of `path` via os.scandir. Windows."""
-    if not path or not os.path.isdir(path):
+    if not path or not os.path.isdir(api_path(path)):
         return []
     results = []
     try:
-        entries = sorted(os.listdir(path))
+        entries = sorted(os.listdir(api_path(path)))
     except PermissionError:
         return [{"name": "(permission denied)", "path": path,
                  "size_kb": 0, "size_h": "?", "denied": True}]
     for name in entries:
         child = os.path.join(path, name)
-        if os.path.islink(child):
+        if os.path.islink(api_path(child)):
             continue
         try:
             # islink() is False for Windows junctions; the reparse attribute
             # (0x400) is the reliable marker. Absent on macOS -> no-op.
-            if getattr(os.stat(child, follow_symlinks=False),
+            if getattr(os.stat(api_path(child), follow_symlinks=False),
                        "st_file_attributes", 0) & 0x400:
                 continue
         except OSError:
             continue
         try:
-            kb = (os.path.getsize(child) if os.path.isfile(child)
+            kb = (os.path.getsize(api_path(child)) if os.path.isfile(api_path(child))
                   else dir_size_bytes(child)) // 1024
         except (PermissionError, OSError):
             continue
@@ -322,11 +323,28 @@ def main():
     # the JSON survives piping and reads back portably.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--all-drives', action='store_true', help='Windows: scan contents of every local fixed volume once')
+    parser.add_argument('--progress', action='store_true', help='Write scan progress to stderr; stdout remains JSON')
+    parser.add_argument('--output', help='Save UTF-8 JSON to a NEW file instead of shell redirection')
+    args = parser.parse_args()
     started = time.time()
+    diagnostics = None
     if sys.platform == "darwin":
+        if args.all_drives:
+            parser.error('--all-drives is Windows-only')
         system, groups = scan_macos()
     elif sys.platform.startswith("win"):
-        system, groups = scan_windows()
+        if args.all_drives:
+            from scan_windows_full import fixed_drives, watch_paths, scan_roots
+            roots = fixed_drives()
+            def progress(row):
+                print(json.dumps({'scan_progress': row}, ensure_ascii=True), file=sys.stderr, flush=True)
+            groups, diagnostics = scan_roots(roots, watch_paths(roots), progress=progress if args.progress else None)
+            system = system_info_windows()
+        else:
+            system, groups = scan_windows()
     else:
         print(json.dumps({"error": "unsupported_platform", "platform": sys.platform,
                           "message": "scan.py supports macOS and Windows only."},
@@ -338,7 +356,14 @@ def main():
         "groups": groups,
         "scan_seconds": round(time.time() - started, 1),
     }
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    if diagnostics is not None:
+        data['coverage'] = diagnostics
+        data['scan_scope'] = 'all_local_fixed_volumes'
+    if args.output:
+        with open(args.output, 'x', encoding='utf-8') as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+    else:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
