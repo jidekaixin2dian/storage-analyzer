@@ -14,7 +14,8 @@ Output shape (same on both OSes):
   "system": {os, build, arch, user, home, filesystem,
              disk_total, disk_used, disk_free, purgeable,
              disks: [{name, total, used, free}]},   # all volumes/drives
-  "groups": { "<group>": [{name, path, size_kb, size_h}], ... }
+  "groups": { "<group>": [{name, path, size_kb, size_h}], ... },
+  "system_space": {items: [...], elevated: bool, ...}   # Windows only, read-only
 }
 """
 import json
@@ -328,6 +329,8 @@ def main():
     parser.add_argument('--all-drives', action='store_true', help='Windows: scan contents of every local fixed volume once')
     parser.add_argument('--progress', action='store_true', help='Write scan progress to stderr; stdout remains JSON')
     parser.add_argument('--output', help='Save UTF-8 JSON to a NEW file instead of shell redirection')
+    parser.add_argument('--no-system-probe', action='store_true',
+                        help='Windows: skip the read-only system-space probe (WinSxS/DriverStore/update caches)')
     args = parser.parse_args()
     started = time.time()
     diagnostics = None
@@ -359,6 +362,16 @@ def main():
     if diagnostics is not None:
         data['coverage'] = diagnostics
         data['scan_scope'] = 'all_local_fixed_volumes'
+    # Windows: read-only probe of system-level space that the hot-spot groups
+    # cannot see (WinSxS / DriverStore / update caches / recovery / hiberfil...).
+    # Failure here must never invalidate the main scan.
+    if sys.platform.startswith("win") and not args.no_system_probe:
+        try:
+            from probe_system import collect as collect_system_space
+            data["system_space"] = collect_system_space()
+        except Exception as exc:
+            data["system_space"] = {"error": "%s: %s" % (type(exc).__name__, exc),
+                                    "items": [], "elevated": False}
     if args.output:
         with open(args.output, 'x', encoding='utf-8') as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2)

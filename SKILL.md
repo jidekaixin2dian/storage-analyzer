@@ -60,7 +60,11 @@ py -3 scripts\scan.py --all-drives --progress --output "$env:TEMP\storage_scan_f
 - **macOS**：扫 home、library、caches、containers、group_containers、app_support、applications、downloads、dev_caches，用 `du` 算大小。
 - **Windows**：扫 user_profile、appdata_local、appdata_roaming、temp、downloads、program_files(_x86)、dev_caches、recycle_bin（`C:\$Recycle.Bin` 各用户子目录聚合成一项），用 `os.scandir` 算大小；`system.disks` 含所有盘符。
 
-输出 JSON：`system`（系统/磁盘信息，含 `disk_name` 主盘名 + `disks` 全部盘）+ `groups`（各组子目录大小，已降序、过滤 50MB 以下）。扫描较慢，耐心等。读不到的目录标 `denied`，需在报告里列出并提示遗漏体量。
+输出 JSON：`system`（系统/磁盘信息，含 `disk_name` 主盘名 + `disks` 全部盘）+ `groups`（各组子目录大小，已降序、过滤 50MB 以下）+ `system_space`（Windows 系统级空间只读探测，见下）。扫描较慢，耐心等。读不到的目录标 `denied`，需在报告里列出并提示遗漏体量。
+
+Windows 的 `system_space` 是扫描时自动附带的只读探测，约 10–20 秒：组件存储（WinSxS）、Installer 缓存、DriverStore、恢复分区、休眠/页面文件、Windows.old、更新缓存、崩溃转储、日志、Prefetch、系统 Temp，以及驱动使用统计。它只报**目录尺寸**，不等于可回收量；不需要时加 `--no-system-probe` 跳过。
+
+需要“组件存储到底能回收多少”时，再按 [Windows 管理员只读分析](references/windows.md#管理员只读分析系统空间) 运行提权分析：UAC 只提升只读探测子进程，结果合并回分析 JSON，不提升报告服务。
 
 ### Step 2 分析与分级
 
@@ -72,6 +76,8 @@ py -3 scripts\scan.py --all-drives --progress --output "$env:TEMP\storage_scan_f
    - 🟢 **可自动清理**：核实到具体子目录的纯缓存、过期临时产物和已完成安装/下载的残留，确认可再生且不含用户数据。不能把整个 `.cache`、Temp、Downloads、虚拟环境或依赖目录自动列绿灯；其中可能有模型、工具运行时、未保存文件和仍在使用的包。浏览器只选缓存子目录，保留登录态与书签。用户明确要求保留的工具链独立排除。
    - 🟡 **需人工判断**：含用户数据或有判断成本（离线视频、文档、项目代码 node_modules、聊天记录、设计稿）。给内容画像 + 至少 3 句处置路径（应用内清理 / 系统工具 / 文件管理器手动审查，三选最合适）+ 风险提示。**所有橙灯项在服务模式下自动有「在访达/资源管理器打开」按钮**（跳过去自己审查删）；如果该项有一个核实过、删了不破坏 App 的安全子路径（如 B站离线视频的 `.Downloads` 目录、旧备份目录），给它 `trash_paths` → 网页出现「移到废纸篓」按钮（橙灯只准移废纸篓、可逆，绝不给"直接删除"）。App 托管又无安全子路径的（Chrome/微信）只给打开按钮、不给 trash_paths。Windows 的回收站（`recycle_bin` 组）恒归 🟡，而且**只给文字处置**（设置 > 系统 > 存储 > 临时文件、`cleanmgr`、资源管理器里右键清空回收站）：不要把 `C:\$Recycle.Bin` 写进 `path` 或 `trash_paths`，它在 HOME 外，白名单与越界校验一定会拒，给了按钮就是死按钮。按钮下方会自动写明注意事项（打开只查看不删、移废纸篓可逆需清空才释放等）；如果某项在文件管理器里是 App 内部格式、不方便手动挑选，给它一个 `open_note` 字段做客观说明（会显示在注意事项里）。**口吻要中性、像产品说明**：直接描述"这里是什么结构、为什么不好手动删、想精细操作该去哪"，不要写成"我发现/提醒注意/看着像没视频"这种暴露开发者踩坑视角的话。
    - 🔴 **谨慎清理（有决策但不建议手删）**：你可能想动、但建议别手删的具体项——重复安装的应用、想卸载的大应用、运行中应用的核心数据等。给"为什么不建议手删" + `indirect_release` 写**具体卸载步骤**（自带卸载器 / 启动台长按 / 右键移废纸篓 / AppCleaner 清残留 / App Store 可重装等，要可照做不是空话）。应用项给 `app_paths`（真实 `.app` 绝对路径数组）→ 网页出现「在文件管理器打开（去卸载）」按钮，定位到 App 让用户自己正规卸载。**红灯不给删除/卸载按钮**（应用在系统目录、可能要管理员密码、可能有自带卸载器和残留，后台代删不稳妥）。**纯系统文件、APFS 快照不要单独列红卡**（没有清理决策），归蓝色即可；系统层面的释放技巧（重启释 swap、Time Machine 快照策略、可清除空间自动回收）写进 `summary.long_term` 长期建议。
+
+4. **`system_space` 不放进三灯。** 系统级空间单独成段：说明它是什么、为什么不能把目录大小当成可回收量、官方处置命令和风险。不要给这些项写 `trash_paths`，也不要塞进 green/yellow/red——它们不在网页删除白名单里。若 `system_space.elevated_analysis` 存在，用它给出的 DISM 实际大小/可回收包来写说明；没有就写明“可回收量未知”。
 
 每个 🟢 项要给：预估释放空间、清理前需关闭的进程、可一键复制的清理命令（用移到废纸篓或 App 自身清理入口的安全方式，谨慎用 `rm`；如用 `rm` 必须是明确的缓存子目录）。
 
@@ -104,7 +110,7 @@ start "$env:USERPROFILE\Desktop\storage-report.html"
 
 **排障：网页上没有删除/移废纸篓按钮** = 要么开的是静态报告（改用 `server.py`），要么 🟢 项漏了 `trash_paths`（补上重启服务）。**排障：点按钮报「连接失败」或顶部出现红色「服务已断开」横幅** = 该标签页对应的服务进程已关闭或被替换（旧标签页不会自动知道）。关闭旧标签页重开即可；`server.py` 对同一份分析 JSON 会自动复用存活实例（heartbeat 校验 mtime 一致），不会重复起服务；页面右下角状态灯每 8 秒监测一次服务健康。
 
-报告阅读流（固定顺序）：磁盘总览卡片（容量 + 进度条 + 三色容量 pills + 系统信息，纯数据）→ 占用排行 Top5 → 执行建议 → 🟢🟡🔴 三级可折叠卡片（命令一键复制）→ 长期优化建议。即"现状 → 诊断 → 处方 → 操作 → 预防"。
+报告阅读流（固定顺序）：磁盘总览卡片（容量 + 进度条 + 三色容量 pills + 系统信息，纯数据）→ 占用排行 Top5 → 执行建议 → 系统占用（只读探测，需管理员处置）→ 🟢🟡🔴 三级可折叠卡片（命令一键复制）→ 长期优化建议。即"现状 → 诊断 → 处方 → 系统层 → 操作 → 预防"。系统占用段没有删除按钮，也不参与顶部三色分段。
 
 注意 `summary.overview` 要写成一句话洞察（直接说最大占用是什么、能释放多少），不要重复总/已用/可用数字——那些已在卡片大数字里显示。overview 渲染在"执行建议"小节开头作引子（普通文字），紧接着是 `summary.priority` 优先级清单。
 
@@ -144,6 +150,7 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
   - 扫描补 `recycle_bin` 组（`C:\$Recycle.Bin` 聚合），回收站不再漏在扫描范围外；
   - 二级护栏收紧：rm/trash 的根目录只认 $HOME，`/Applications` 与 Program Files 仅在 `open` 下放行（此前 rm 也能拿到 /Applications）；
   - 报告文案按系统切换「废纸篓/回收站」「访达/资源管理器」，Windows 上不再显示访达。
+  - 新增 `system_space` 只读系统探测（WinSxS / Installer / DriverStore / 恢复分区 / 休眠 / Windows.old / 更新缓存 / 转储 / 日志 / Prefetch / 系统 Temp），真机 WinSxS 104,466 文件约 5 秒；`--elevate` 通过 UAC 只提升只读分析子进程，结果用 `--merge` 合并，报告段没有删除按钮。
 - **Windows agent 后台拉起 server.py**：bash 管道下 stdio 句柄继承会让启动命令挂死，用 `Invoke-CimMethod Win32_Process Create` 完全脱离，再读 `<analysis>.server-url.txt` 拿 URL。
 
 Windows 侧的问题在 [jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer) 提 issue —— 本仓库是这个 skill 的实际维护分支（见「来源与维护声明」）。

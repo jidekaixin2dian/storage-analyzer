@@ -32,12 +32,35 @@ Windows 目录可能包含尾部空格/点或超过传统长度限制；扫描�
 | `%USERPROFILE%\Downloads` 的安装包 | 下载文件、可能尚未安装或唯一的离线包 | 只对已确认完成安装且可重新取得的残留列 🟢；其余 🟡 |
 | `C:\$Recycle.Bin`（扫描已聚合成 `recycle_bin` 组） | 用户自己删掉的东西 | 🟡 只给文字处置：设置 > 存储 > 临时文件、`cleanmgr`、资源管理器右键清空。它在 HOME 外，**不要填进 `path`/`trash_paths`**，白名单会拒、按钮是死的 |
 
-## 系统占用（不上灯，归蓝色"系统及其他"，间接释放写 long_term）
+## 系统占用（不上灯，单独成段）
 
-- `C:\Windows\WinSxS`：组件存储，**绝不能手删**，用 `DISM /Online /Cleanup-Image /StartComponentCleanup`
-- `C:\Windows\SoftwareDistribution\Download`：Windows Update 缓存，用磁盘清理处理
-- `hiberfil.sys`（休眠）、`pagefile.sys`（虚拟内存）：系统管理，别手动删
-- 间接释放：设置 > 系统 > 存储 > 存储感知；`cleanmgr`（磁盘清理）；扩展磁盘清理选 Windows 更新清理
+这些项由 `system_space` 只读探测自动采集；报告里单独成段、没有删除按钮，也不参与三色分段。
+
+| 项 | 位置 | 免管理员 | 处置 |
+|---|---|---|---|
+| 组件存储 WinSxS | `C:\Windows\WinSxS` | 可读大小 | `dism /online /cleanup-image /startcomponentcleanup`（`/resetbase` 不可逆） |
+| Installer 缓存 | `C:\Windows\Installer` | 可读 | 孤立 msp 需专门工具按注册表核对，不按文件名删 |
+| 驱动仓库 | `...\DriverStore\FileRepository` | 可读 | `pnputil /enum-devices /drivers` 核对；未匹配当前设备 ≠ 可删 |
+| 恢复分区 | GPT Recovery 分区 | 可读分区大小 | `reagentc /info` 需管理员 |
+| 休眠文件 | `C:\hiberfil.sys` | 可读 | `powercfg /h off`（同时关闭快速启动） |
+| 页面文件 | `pagefile.sys` / `swapfile.sys` | 可读 | 系统管理，不建议手删 |
+| Windows.old | `C:\Windows.old`、`$Windows.~BT`、`$Windows.~WS` | 可读 | `cleanmgr` / 设置 > 系统 > 存储 |
+| 更新与传递优化缓存 | `SoftwareDistribution\Download`、`DeliveryOptimization` | 可读 | `cleanmgr`；直接删需先停 wuauserv / DOSvc |
+| 崩溃转储/WER/日志/Prefetch/系统 Temp | 各自路径 | 可读 | 低收益，按需清理 |
+
+**尺寸 ≠ 可回收量**：WinSxS 的目录求和是组件存储总量（真机实测 11.98 GB / 104,466 文件，约 5 秒读完），可回收量只有 DISM 分析能给。不要把系统项写进 `path` 或 `trash_paths`：它们在 `$HOME` 外，白名单会拒，按钮是死的。
+
+## 管理员只读分析（系统空间）
+
+```powershell
+py -3 scripts\probe_system.py --elevate --json "$env:TEMP\sys_probe_admin.json"
+py -3 scripts\probe_system.py --merge "$env:TEMP\storage_analysis.json" --with "$env:TEMP\sys_probe_admin.json"
+```
+
+- `--elevate` 用 `Start-Process -Verb RunAs` 只提升这个只读子进程；UAC 取消返回 2，报告照常显示“可回收量未知”。
+- 子进程运行 `DISM /Online /Cleanup-Image /AnalyzeComponentStore`、`reagentc /info`、`vssadmin list shadowstorage`、`powercfg /a`，全程只读、不清理。
+- `--merge` 原子替换分析 JSON；必须重新打开报告才能看到新数据。
+- 解析兼容中英文 DISM 输出；解析失败时保留原始片段并标注“需人工查看”，不猜数字。
 
 ## 删除机制
 

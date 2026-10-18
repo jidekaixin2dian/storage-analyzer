@@ -17,6 +17,7 @@ Schema (all sections optional except system):
   "yellow": [{name, path, size, content_profile, why_manual, disposal, risk, trash_paths:[...]?, open_note?}],
   "red":    [{name, path, size, why_keep, indirect_release, auto_reclaim, app_paths:[...]?}],
   "denied": ["/path/one", ...],
+  "system_space": {items:[...], elevated:bool, elevated_analysis:{...}?},  # Windows 只读系统空间探测
   "summary": {overview, tier_stats:{green,yellow,red}, priority:[...], long_term:[...]}
 }
 """

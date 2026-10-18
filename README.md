@@ -17,7 +17,7 @@
 
 ## 它做什么
 
-1. **只读扫描**：`scan.py` 扫描用户目录、AppData、开发缓存、Program Files 等典型占用大户（不改动任何文件）；
+1. **只读扫描**：`scan.py` 扫描用户目录、AppData、开发缓存、Program Files 等典型占用大户（不改动任何文件）；Windows 额外附带 `system_space` 系统级空间探测（WinSxS、Installer、DriverStore、恢复分区、更新缓存等），只报尺寸、不删任何东西；
 2. **三级分诊**：由 AI Agent 把扫描结果分成 🟢可自动清理（纯缓存）/ 🟡需人工判断（含用户数据）/ 🔴谨慎清理（建议走正规卸载），每项给出体量、依据与处置路径；
 3. **交互报告**：`server.py` 生成本地网页报告 —— 分段磁盘条、Top 占用排行、可折叠卡片、删除按钮（每次点击都有确认弹窗，🟢 可移回收站/直接删，🟡 仅回收站，🔴 只提供"打开去卸载"）；
 4. **安全模型**：三套白名单（rm/trash/open 权限从严到宽）+ 会话 token + Host 校验 + realpath 越界拦截，删除接口无法被用于白名单之外的任何路径。
@@ -78,6 +78,7 @@ python -m unittest discover -s scripts -p "test_*.py" -v
 - **删除**：`SHFileOperationW` 走系统回收站（可逆，清空回收站后才真正释放空间）—— 单文件与整个目录都已在 Windows 11 真机复验通过
 - **页面文案**：按系统切换「废纸篓 / 回收站」「访达 / 资源管理器」，Windows 上不会再冒出「访达可恢复」
 - **安全**：`rm`/`trash` 的根目录校验收紧为只认 `$HOME`，`/Applications` 与 Program Files 只在非破坏性的 `open` 下放行
+- **系统空间**：新增 `scripts/probe_system.py` 只读探测系统级占用（WinSxS 等），报告单独成段且不提供删除按钮；需要精确可回收量时用 `--elevate` 走 UAC 只提权只读分析子进程，`--merge` 合并结果
 
 详见 [SKILL.md](SKILL.md) 的「平台状态」与「来源与维护声明」。
 

@@ -115,6 +115,8 @@
   .item.green{border-left-color:var(--green)}
   .item.yellow{border-left-color:var(--yellow)}
   .item.red{border-left-color:var(--red)}
+  .item.blue{border-left-color:var(--blue)}
+  .item.blue .item-head{cursor:default}
   .item-head{display:flex;align-items:center;gap:12px;padding:13px 16px;cursor:pointer;user-select:none}
   .item-head:hover{background:var(--card2)}
   .item-name{font-weight:600;font-size:14.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -139,6 +141,17 @@
   .risk{background:var(--red-dim);border:1px solid #f6c9cd;color:#b23a43;
     padding:9px 13px;border-radius:9px;font-size:13px;margin-top:11px}
   .note{font-size:12px;color:var(--faint);margin-top:8px}
+
+  /* system-space probe */
+  .sys-note{background:var(--blue-dim);border:1px solid #c9dff2;border-radius:10px;
+    padding:12px 14px;font-size:13px;color:var(--sub);margin-bottom:14px;line-height:1.65}
+  .elev{background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);
+    border-radius:10px;padding:14px 16px;margin:0 0 14px;font-size:13px;line-height:1.7}
+  .elev.warn{border-left-color:var(--yellow);background:var(--yellow-dim)}
+  .mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+    gap:10px 20px;margin-top:10px}
+  .mini-grid div{font-size:13px;color:var(--ink)}
+  .mini-grid span{display:block;font-size:11.5px;color:var(--faint);margin-bottom:2px}
 
   /* command block */
   .cmd{position:relative;background:#0f1722;color:#dbe6f2;border-radius:10px;
@@ -270,7 +283,7 @@ function renderSystem(s, sm){
   const allDisks = s.disks || [];
   const others = allDisks.filter(d => d.name !== s.disk_name);
   const barLabel = allDisks.length > 1
-    ? `<div class="bar-label">系统盘 ${esc(s.disk_name||'')} · 已用部分按清理分级着色</div>` : '';
+    ? `<div class="bar-label">系统盘 ${esc(s.disk_name||'')}${(sm && sm.tier_stats)?' · 已用部分按清理分级着色':''}</div>` : '';
   const otherDisksBlock = others.length ? `<div class="other-disks">
       <div class="label">其他磁盘</div>
       ${others.map(d=>{
@@ -309,6 +322,56 @@ function parseGB(str){
   let v=parseFloat(m[1]); const u=(m[2]||'GB').toUpperCase();
   if(u==='TB') v*=1024; else if(u==='MB') v/=1024;
   return v;
+}
+
+// —— 系统占用：只读探测结果，单独成段，不并入三灯、不提供删除按钮 ——
+function renderSystemSpace(ss){
+  if(!ss || !ss.items || !ss.items.length) return '';
+  const ea = ss.elevated_analysis || null;
+  const dism = (ea && ea.dism && ea.dism.parsed) ? ea.dism.parsed : null;
+  const elevCmd = 'py -3 scripts/probe_system.py --elevate --json "%TEMP%/sys_probe_admin.json"';
+  let elevated = '';
+  if(ss.elevated && dism && dism.available){
+    const rec = dism.recommended===true ? '建议清理' : (dism.recommended===false ? '暂不建议清理' : '未知');
+    elevated = `<div class="elev"><b>管理员只读分析（DISM AnalyzeComponentStore）</b>
+      <div class="mini-grid">
+        <div><span>组件存储实际大小</span>${esc(dism.actual||'未知')}</div>
+        <div><span>与 Windows 共享</span>${esc(dism.shared||'未知')}</div>
+        <div><span>备份和禁用的功能</span>${esc(dism.backups||'未知')}</div>
+        <div><span>缓存和临时数据</span>${esc(dism.cache||'未知')}</div>
+        <div><span>可回收程序包</span>${dism.reclaimable==null?'未知':esc(dism.reclaimable)+' 个'}</div>
+        <div><span>DISM 建议</span>${esc(rec)}</div>
+      </div>
+      <div class="note">这是 DISM 的只读分析结果，不代表已经执行清理；实际可释放量以执行时为准。</div>
+    </div>`;
+  } else if(ss.elevated){
+    elevated = `<div class="elev warn"><b>管理员分析未完成</b>${ea && ea.error ? `（${esc(ea.error)}）` : ''}，可回收量仍未知。</div>`;
+  } else {
+    elevated = `<div class="elev">当前是普通权限探测：这里只有目录尺寸，<b>不是可回收量</b>。
+      <div class="cmd-label">需要精确数字时，复制命令并在 UAC 弹窗点「是」：</div>
+      <div class="cmd">${esc(elevCmd)}${copyBtn(elevCmd)}</div>
+      <div class="note">结果写出后，用 <code>py -3 scripts/probe_system.py --merge &lt;analysis.json&gt; --with "%TEMP%/sys_probe_admin.json"</code> 合并进分析 JSON，再重新打开报告。</div>
+    </div>`;
+  }
+  const note = `<div class="sys-note">系统级空间：只读探测，<b>本页不提供删除按钮</b>。清理需要管理员权限，且多数操作不可逆；请按条目说明自行在管理员终端执行命令，执行前确认风险。</div>`;
+  const cards = ss.items.map(it=>{
+    const meta = [];
+    meta.push('风险：' + (it.risk_label || it.risk || '未知'));
+    meta.push(it.admin_required ? '需要管理员权限' : '免管理员可读');
+    if(it.files) meta.push(it.files + ' 个文件');
+    if(it.denied) meta.push(it.denied + ' 个路径无权读取');
+    let body = `<div class="field"><div class="label">处置说明</div>${esc(it.note||'')}</div>`;
+    if(it.reclaim && it.reclaim.actual){
+      body += `<div class="field"><div class="label">DISM 分析</div>实际 ${esc(it.reclaim.actual)} · 与 Windows 共享 ${esc(it.reclaim.shared||'未知')} · 可回收程序包 ${esc(it.reclaim.reclaimable_packages==null?'未知':it.reclaim.reclaimable_packages)}</div>`;
+    }
+    if(it.command){
+      body += `<div class="cmd-label">官方处置命令（复制后自行执行，本页不代执行）</div>
+        <div class="cmd">${esc(it.command)}${copyBtn(it.command)}</div>`;
+    }
+    body += `<div class="note">${meta.map(esc).join(' · ')}</div>`;
+    return card('blue', it.name, it.present ? it.size_h : '未检测到', it.path, esc(it.brief||''), body, '');
+  }).join('');
+  return section('系统占用（只读探测，需管理员处置）', ss.items.length, note + elevated + cards);
 }
 
 function renderTop5(rows){
@@ -538,6 +601,7 @@ const app=document.getElementById('app');
 app.innerHTML = renderSystem(DATA.system, DATA.summary)
   + renderTop5(DATA.top5)
   + renderPriority(DATA.summary)
+  + renderSystemSpace(DATA.system_space)
   + renderGreen(DATA.green)
   + renderYellow(DATA.yellow)
   + renderRed(DATA.red)
