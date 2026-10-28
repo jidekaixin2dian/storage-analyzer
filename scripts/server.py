@@ -33,6 +33,8 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from report_html import render_report
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(HERE, "..", "assets", "report_template.html")
 HOME = os.path.realpath(os.path.expanduser("~"))
@@ -141,6 +143,8 @@ def _trash_windows(path):
     rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     if rc != 0:
         raise OSError("SHFileOperation failed (code %d)" % rc)
+    if op.fAnyOperationsAborted:
+        raise OSError("回收站操作已取消或未完成，请检查原路径后重试")
 
 
 def hard_delete(path):
@@ -194,9 +198,7 @@ class Handler(BaseHTTPRequestHandler):
                 mtime = 0
             self._send(200, json.dumps({"ok": True, "mtime": mtime}), "application/json")
         elif self.path in ("/", "/index.html"):
-            blob = json.dumps(DATA, ensure_ascii=False)
-            cfg = json.dumps({"token": TOKEN, "endpoint": "/action"})
-            html = TPL.replace("__REPORT_DATA__", blob).replace("__DELETE_CONFIG__", cfg)
+            html = render_report(TPL, DATA, {"token": TOKEN, "endpoint": "/action"})
             self._send(200, html, "text/html; charset=utf-8")
         else:
             self._send(404, "not found", "text/plain")

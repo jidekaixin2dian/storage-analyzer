@@ -25,6 +25,8 @@ import json
 import os
 import sys
 
+from report_html import render_report
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(HERE, "..", "assets", "report_template.html")
 
@@ -45,9 +47,8 @@ def main():
     with open(TEMPLATE, "r", encoding="utf-8") as f:
         tpl = f.read()
 
-    blob = json.dumps(data, ensure_ascii=False)
     # 静态报告不带删除能力（DELETE=null），删除按钮只在 server.py 服务时出现
-    html = tpl.replace("__REPORT_DATA__", blob).replace("__DELETE_CONFIG__", "null")
+    html = render_report(tpl, data)
 
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)

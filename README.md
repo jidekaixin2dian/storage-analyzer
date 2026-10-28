@@ -68,6 +68,8 @@ python scripts/server.py storage_analysis.json
 python -m unittest discover -s scripts -p "test_*.py" -v
 ```
 
+GitHub Actions 在 Windows、macOS 和 Linux 上运行这些合成数据回归，另在 Windows 检查 Python 3.8 兼容性。报告数据嵌入与 Windows 回收站取消场景也纳入检查；系统回收站返回值采用模拟，不代替各平台的真实桌面验收。
+
 ## Windows 特化改了什么
 
 在真机（Windows 11）上撞出来并修掉的问题，全部落在代码与文档里，不是纸面适配：

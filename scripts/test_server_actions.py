@@ -1,4 +1,5 @@
 import json
+import ctypes
 import os
 import tempfile
 import threading
@@ -79,6 +80,21 @@ class ActionSafetyTests(unittest.TestCase):
         self.assertEqual(code,400)
         self.assertTrue(self.first.exists())
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows shell cancellation contract')
+    def test_cancelled_trash_is_not_reported_as_completed(self):
+        def cancelled(operation):
+            operation._obj.fAnyOperationsAborted = True
+            return 0
+        with patch.object(server, 'TRASH_ALLOW', {str(self.first.resolve())}), \
+                patch.object(ctypes.windll.shell32, 'SHFileOperationW', side_effect=cancelled):
+            code, result = self.action([str(self.first)], mode='trash')
+        self.assertEqual(code, 500)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['done'], [])
+        self.assertEqual(result['failed'], str(self.first))
+        self.assertIn('取消', result['error'])
+        self.assertTrue(self.first.exists())
+
     def test_heartbeat_ignores_environment_proxy(self):
         # An unusable proxy must not intercept local health checks.
         with patch.dict('os.environ',{'http_proxy':'http://127.0.0.1:1','HTTP_PROXY':'http://127.0.0.1:1','no_proxy':'','NO_PROXY':''}):
@@ -102,6 +118,19 @@ class ActionSafetyTests(unittest.TestCase):
             code,_ = self.action([path],mode='rm')
             self.assertEqual(code,403)
             self.assertTrue(Path(path).is_dir())
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows shell return contract')
+class WindowsTrashTests(unittest.TestCase):
+    def test_successful_shell_return_is_accepted(self):
+        with patch.object(ctypes.windll.shell32, 'SHFileOperationW', return_value=0) as shell:
+            server._trash_windows('synthetic-path-not-created')
+        shell.assert_called_once()
+
+    def test_shell_error_is_preserved(self):
+        with patch.object(ctypes.windll.shell32, 'SHFileOperationW', return_value=5):
+            with self.assertRaisesRegex(OSError, 'code 5'):
+                server._trash_windows('synthetic-path-not-created')
 
 
 if __name__ == '__main__':
