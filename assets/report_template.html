@@ -348,7 +348,7 @@ function renderSystemSpace(ss){
     elevated = `<div class="elev warn"><b>管理员分析未完成</b>${ea && ea.error ? `（${esc(ea.error)}）` : ''}，可回收量仍未知。</div>`;
   } else {
     elevated = `<div class="elev">当前是普通权限探测：这里只有目录尺寸，<b>不是可回收量</b>。
-      <div class="cmd-label">需要精确数字时，复制命令并在 UAC 弹窗点「是」：</div>
+      <div class="cmd-label">可选：仅需进一步诊断 WinSxS 时运行以下命令。普通分析可跳过；结果提供实际大小与清理建议，不承诺释放空间：</div>
       <div class="cmd">${esc(elevCmd)}${copyBtn(elevCmd)}</div>
       <div class="note">结果写出后，用 <code>py -3 scripts/probe_system.py --merge &lt;analysis.json&gt; --with "%TEMP%/sys_probe_admin.json"</code> 合并进分析 JSON，再重新打开报告。</div>
     </div>`;

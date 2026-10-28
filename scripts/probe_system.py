@@ -437,7 +437,7 @@ def collect(include_driver_usage=True):
         "system-store", "high",
         "系统更新历史与被取代组件的存放处；这里的大小是组件存储总量，不是可回收量。",
         "清理会移除被取代组件，可能失去卸载已装更新、修复系统组件的能力；"
-        "可回收量只有管理员运行 DISM 分析才能确定。",
+        "按需运行 DISM 可核对实际大小、可回收包数量和清理建议，不能据此承诺精确可释放字节数。",
         command="dism /online /cleanup-image /analyzecomponentstore"))
 
     # 2. Installer cache

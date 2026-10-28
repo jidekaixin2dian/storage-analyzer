@@ -80,7 +80,7 @@ GitHub Actions 在 Windows、macOS 和 Linux 上运行这些合成数据回归�
 - **删除**：`SHFileOperationW` 走系统回收站（可逆，清空回收站后才真正释放空间）—— 单文件与整个目录都已在 Windows 11 真机复验通过
 - **页面文案**：按系统切换「废纸篓 / 回收站」「访达 / 资源管理器」，Windows 上不会再冒出「访达可恢复」
 - **安全**：`rm`/`trash` 的根目录校验收紧为只认 `$HOME`，`/Applications` 与 Program Files 只在非破坏性的 `open` 下放行
-- **系统空间**：新增 `scripts/probe_system.py` 只读探测系统级占用（WinSxS 等），报告单独成段且不提供删除按钮；需要精确可回收量时用 `--elevate` 走 UAC 只提权只读分析子进程，`--merge` 合并结果
+- **系统空间**：`scripts/probe_system.py` 只读探测系统级占用（WinSxS 等），报告单独成段且不提供删除按钮。普通扫描不运行 DISM；只有需要进一步诊断 WinSxS 时，才按需通过 `--elevate` 获取组件存储实际大小、可回收包数量与清理建议，再用 `--merge` 合并结果。这些数据不等于精确可释放字节数，普通分析无需补跑。
 
 详见 [SKILL.md](SKILL.md) 的「平台状态」与「来源与维护声明」。
 

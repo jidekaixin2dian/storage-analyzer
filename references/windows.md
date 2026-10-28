@@ -48,9 +48,11 @@ Windows 目录可能包含尾部空格/点或超过传统长度限制；扫描�
 | 更新与传递优化缓存 | `SoftwareDistribution\Download`、`DeliveryOptimization` | 可读 | `cleanmgr`；直接删需先停 wuauserv / DOSvc |
 | 崩溃转储/WER/日志/Prefetch/系统 Temp | 各自路径 | 可读 | 低收益，按需清理 |
 
-**尺寸 ≠ 可回收量**：WinSxS 的目录求和是组件存储总量（真机实测 11.98 GB / 104,466 文件，约 5 秒读完），可回收量只有 DISM 分析能给。不要把系统项写进 `path` 或 `trash_paths`：它们在 `$HOME` 外，白名单会拒，按钮是死的。
+**尺寸 ≠ 可回收量**：WinSxS 的目录求和可能重复计算硬链接，不能代表独占磁盘占用。DISM 可提供考虑硬链接后的实际大小、共享部分、可回收包数量与清理建议，但不能据此承诺精确可释放字节数。详见 [微软对组件存储大小的说明](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/determine-the-actual-size-of-the-winsxs-folder)。不要把系统项写进 `path` 或 `trash_paths`：它们在 `$HOME` 外，白名单会拒，按钮是死的。
 
 ## 管理员只读分析（系统空间）
+
+这是可选诊断，不是普通扫描的必经步骤。仅在用户需要判断 WinSxS 占用或清理建议时使用；DISM 单次执行最长等待 15 分钟，整个提权流程最长等待 20 分钟（超时上限，不是通常耗时）。跳过或失败不影响普通报告交付，不为填满报告字段反复重试。
 
 ```powershell
 py -3 scripts\probe_system.py --elevate --json "$env:TEMP\sys_probe_admin.json"

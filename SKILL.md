@@ -64,7 +64,7 @@ py -3 scripts\scan.py --all-drives --progress --output "$env:TEMP\storage_scan_f
 
 Windows 的 `system_space` 是扫描时自动附带的只读探测，约 10–20 秒：组件存储（WinSxS）、Installer 缓存、DriverStore、恢复分区、休眠/页面文件、Windows.old、更新缓存、崩溃转储、日志、Prefetch、系统 Temp，以及驱动使用统计。它只报**目录尺寸**，不等于可回收量；不需要时加 `--no-system-probe` 跳过。
 
-需要“组件存储到底能回收多少”时，再按 [Windows 管理员只读分析](references/windows.md#管理员只读分析系统空间) 运行提权分析：UAC 只提升只读探测子进程，结果合并回分析 JSON，不提升报告服务。
+DISM 是可选的 WinSxS 专项诊断，普通扫描不会调用。仅在用户要求分析组件存储、且结果会影响处置判断时，按 [Windows 管理员只读分析](references/windows.md#管理员只读分析系统空间) 获取实际大小、可回收包数量和清理建议。它不能给出精确可释放字节数；不要为了补全报告或消除“未知”而自动提权补跑。跳过、超时或无法解析时继续交付普通报告，不反复重试。UAC 只提升诊断子进程，不提升报告服务。
 
 ### Step 2 分析与分级
 
