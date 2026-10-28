@@ -225,7 +225,8 @@ class CollectShapeTests(unittest.TestCase):
     def test_collect_shape_with_stubbed_measurements(self):
         fake = {"present": True, "size_bytes": 1024 ** 3, "files": 10,
                 "denied": 0, "skipped_reparse": 0}
-        with patch.object(probe_system, "_stat_path", return_value=fake), \
+        with patch.object(probe_system, "IS_WINDOWS", True), \
+                patch.object(probe_system, "_stat_path", return_value=fake), \
                 patch.object(probe_system, "_combine", return_value=fake), \
                 patch.object(probe_system, "driver_usage",
                              return_value={"available": False}), \
@@ -244,6 +245,15 @@ class CollectShapeTests(unittest.TestCase):
         for item in data["items"]:
             self.assertIn("risk", item)
             self.assertNotIn("trash_paths", item)
+
+    def test_non_windows_probe_does_not_measure_system_paths(self):
+        with patch.object(probe_system, "IS_WINDOWS", False), \
+                patch.object(probe_system, "_stat_path") as measure:
+            data = probe_system.collect()
+        self.assertEqual(data['items'], [])
+        self.assertFalse(data['elevated'])
+        self.assertTrue(data['coverage']['warnings'])
+        measure.assert_not_called()
 
 
 class TemplateTests(unittest.TestCase):

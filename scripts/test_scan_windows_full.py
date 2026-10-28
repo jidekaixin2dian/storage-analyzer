@@ -85,9 +85,16 @@ class VolumeScanTests(unittest.TestCase):
     def test_relative_path_remains_usable(self):
         # The legacy hotspot helpers accept relative paths too. Extended paths
         # must be absolute before the Windows native prefix is added.
-        relative = os.path.relpath(self.a/'nested'/'data')
-        with open(api_path(relative), 'rb') as stream:
-            self.assertEqual(stream.read(), b'abc')
+        # CI may put the checkout on D: and temporary fixtures on C:.
+        # Relative paths must be exercised from the fixture's own volume.
+        previous = os.getcwd()
+        try:
+            os.chdir(self.base)
+            relative = os.path.relpath(self.a/'nested'/'data')
+            with open(api_path(relative), 'rb') as stream:
+                self.assertEqual(stream.read(), b'abc')
+        finally:
+            os.chdir(previous)
 
 
 if __name__ == '__main__':
