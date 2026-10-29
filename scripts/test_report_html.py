@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,13 @@ class ReportEmbeddingTests(unittest.TestCase):
                 http.shutdown()
                 http.server_close()
                 thread.join()
+
+
+class ReportRuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'optional Node runtime unavailable')
+    def test_report_functions_and_partial_operation_state(self):
+        subprocess.run([shutil.which('node'), str(Path(__file__).with_name('test_report_runtime.js')),
+                        server.TEMPLATE], check=True, capture_output=True, text=True)
 
 
 if __name__ == '__main__':

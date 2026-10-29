@@ -13,13 +13,19 @@ Schema (all sections optional except system):
   "system": {os, build, arch, user, home, filesystem,
              disk_total, disk_used, disk_free, purgeable},
   "top5": [{rank, tier(green|yellow|red), size, type, name, path, note}],
-  "green":  [{name, path, size_estimate, kill_processes:[], trash_paths:[...], commands:[{label,cmd}]}],
+  "green":  [{name, path, size_estimate, evidence?, next_step?, kill_processes:[], trash_paths:[...], commands:[{label,cmd}]}],
   "yellow": [{name, path, size, content_profile, why_manual, disposal, risk, trash_paths:[...]?, open_note?}],
   "red":    [{name, path, size, why_keep, indirect_release, auto_reclaim, app_paths:[...]?}],
   "denied": ["/path/one", ...],
+  "scan_scope": "windows_hotspots|all_local_fixed_volumes|...",  # copy from scan
+  "coverage": {...},  # copy scan coverage unchanged; never infer full success
   "system_space": {items:[...], elevated:bool, elevated_analysis:{...}?},  # Windows 只读系统空间探测
   "summary": {overview, tier_stats:{green,yellow,red}, priority:[...], long_term:[...]}
 }
+
+Each tier item may add `evidence` (a short verified observation tied to its path).
+Keep directory size distinct from an estimated reclaim amount. Unknown reclaim
+amounts should remain unknown; no estimate is required for yellow/red items.
 """
 import json
 import os

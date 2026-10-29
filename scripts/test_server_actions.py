@@ -74,6 +74,55 @@ class ActionSafetyTests(unittest.TestCase):
         self.assertEqual(code,500)
         self.assertEqual(result['done'],[str(self.first)])
         self.assertTrue(self.second.exists())
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual([r['status'] for r in result['results']], ['completed', 'failed'])
+
+    def test_cancelled_batch_preserves_done_and_unattempted_paths(self):
+        third = self.home/'third'
+        third.write_bytes(b'synthetic')
+        with patch.object(server, 'TRASH_ALLOW', {str(p.resolve()) for p in (self.first, self.second, third)}):
+            def controlled(path):
+                if path == str(self.second.resolve()):
+                    raise server.OperationCancelled('synthetic cancellation')
+                os.remove(path)
+            with patch.object(server, 'move_to_trash', side_effect=controlled):
+                code, result = self.action([str(self.first), str(self.second), str(third)], mode='trash')
+        self.assertEqual(code, 500)
+        self.assertEqual([r['status'] for r in result['results']], ['completed', 'cancelled', 'not_attempted'])
+        self.assertTrue(self.second.exists())
+        self.assertTrue(third.exists())
+
+    def test_missing_target_is_not_reported_as_deleted(self):
+        self.first.unlink()
+        code, result = self.action([str(self.first)])
+        self.assertEqual(code, 200)
+        self.assertEqual(result['results'][0]['status'], 'already_missing')
+
+    def test_successful_return_with_remaining_target_is_failure(self):
+        with patch.object(server, 'hard_delete'):
+            code, result = self.action([str(self.first)])
+        self.assertEqual(code, 500)
+        self.assertEqual(result['done'], [])
+        self.assertTrue(self.first.exists())
+
+    def test_open_is_only_submitted_and_missing_target_fails(self):
+        with patch.object(server, 'OPEN_ALLOW', {str(self.first.resolve())}), patch.object(server, 'open_in_file_manager'):
+            code, result = self.action([str(self.first)], mode='open')
+            self.assertEqual(code, 200)
+            self.assertEqual(result['results'][0]['status'], 'submitted')
+            self.first.unlink()
+            code, result = self.action([str(self.first)], mode='open')
+            self.assertEqual(code, 500)
+
+    def test_overlapping_batch_is_rejected_before_mutation(self):
+        parent = self.home/'parent'
+        parent.mkdir()
+        child = parent/'child'
+        child.write_bytes(b'keep')
+        with patch.object(server, 'RM_ALLOW', {str(parent.resolve()), str(child.resolve())}):
+            code, _ = self.action([str(parent), str(child)])
+        self.assertEqual(code, 400)
+        self.assertTrue(child.exists())
 
     def test_paths_string_is_rejected(self):
         code,_ = self.action(str(self.first))
@@ -131,6 +180,21 @@ class WindowsTrashTests(unittest.TestCase):
         with patch.object(ctypes.windll.shell32, 'SHFileOperationW', return_value=5):
             with self.assertRaisesRegex(OSError, 'code 5'):
                 server._trash_windows('synthetic-path-not-created')
+
+
+class MacTrashFailureTests(unittest.TestCase):
+    def test_cancel_does_not_fall_back_to_move(self):
+        result = type('Result', (), {'returncode': 1, 'stderr': 'User canceled. (-128)'})()
+        with patch.object(server.subprocess, 'run', return_value=result), patch.object(server.shutil, 'move') as move:
+            with self.assertRaises(server.OperationCancelled):
+                server._trash_macos('synthetic-not-created')
+        move.assert_not_called()
+
+    def test_finder_error_is_preserved(self):
+        result = type('Result', (), {'returncode': 1, 'stderr': 'synthetic Finder error'})()
+        with patch.object(server.subprocess, 'run', return_value=result):
+            with self.assertRaisesRegex(OSError, 'synthetic Finder error'):
+                server._trash_macos('synthetic-not-created')
 
 
 if __name__ == '__main__':

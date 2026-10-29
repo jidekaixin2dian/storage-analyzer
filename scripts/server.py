@@ -47,6 +47,10 @@ TRASH_ALLOW = set()
 OPEN_ALLOW = set()
 
 
+class OperationCancelled(OSError):
+    """The OS cancelled an operation; earlier paths may already be processed."""
+
+
 def expand(p):
     return os.path.realpath(os.path.expanduser(p))
 
@@ -104,13 +108,13 @@ def move_to_trash(path):
 
 def _trash_macos(path):
     # osascript Finder delete -> macOS Trash, recoverable. First run may prompt
-    # for Finder automation permission. Fall back to ~/.Trash move if it fails.
+    # for Finder automation permission. Never bypass cancellation with a move.
     script = 'tell application "Finder" to delete (POSIX file %s as alias)' % json.dumps(path)
     r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     if r.returncode != 0:
-        dest = os.path.join(HOME, ".Trash",
-                            os.path.basename(path.rstrip("/")) + "." + time.strftime("%H%M%S"))
-        shutil.move(path, dest)
+        if '-128' in r.stderr:
+            raise OperationCancelled('废纸篓操作已取消，请检查原路径')
+        raise OSError((r.stderr or 'Finder 废纸篓操作失败').strip())
 
 
 def _trash_windows(path):
@@ -141,10 +145,10 @@ def _trash_windows(path):
     op.pFrom = os.path.abspath(path) + "\x00\x00"  # double-null terminated list
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
     rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    if op.fAnyOperationsAborted:
+        raise OperationCancelled("回收站操作已取消或未完成，请检查原路径后重试")
     if rc != 0:
         raise OSError("SHFileOperation failed (code %d)" % rc)
-    if op.fAnyOperationsAborted:
-        raise OSError("回收站操作已取消或未完成，请检查原路径后重试")
 
 
 def hard_delete(path):
@@ -267,22 +271,42 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(403, json.dumps({"ok": False, "error": "禁止删除用户目录根路径"}))
                 return
             checked.append((p, rp))
-        done = []
-        for p, rp in checked:
+        # One parent plus its descendant is not two independent operations.
+        if mode != 'open':
+            for i, (_, rp) in enumerate(checked):
+                if any(rp == other or rp.startswith(other.rstrip(os.sep) + os.sep)
+                       or other.startswith(rp.rstrip(os.sep) + os.sep)
+                       for _, other in checked[:i]):
+                    self._send(400, json.dumps({'ok': False, 'error': '目标路径重复或父子重叠，请分别审查后操作'}))
+                    return
+        done, results = [], []
+        for index, (p, rp) in enumerate(checked):
             try:
+                outcome = 'completed'
                 if mode == "open":
+                    if not os.path.exists(rp):
+                        raise FileNotFoundError('目标路径已不存在：' + p)
                     open_in_file_manager(rp)
+                    outcome = 'submitted'
                 elif not os.path.exists(rp):
-                    pass  # already gone, treat as success
+                    outcome = 'already_missing'
                 elif mode == "trash":
                     move_to_trash(rp)
                 else:
                     hard_delete(rp)
+                if mode != 'open' and os.path.lexists(rp):
+                    raise OSError('操作返回后目标仍存在，请检查实际内容；目录可能已部分处理')
                 done.append(p)
+                results.append({'path': p, 'status': outcome})
             except Exception as e:
-                self._send(500, json.dumps({"ok": False, "error": str(e), "done": done, "failed": p}))
+                status = 'cancelled' if isinstance(e, OperationCancelled) else 'failed'
+                results.append({'path': p, 'status': status, 'error': str(e)})
+                results.extend({'path': pending, 'status': 'not_attempted'} for pending, _ in checked[index+1:])
+                self._send(500, json.dumps({"ok": False, "status": 'partial' if done else status,
+                                           "error": str(e), "done": done, "failed": p, "results": results}))
                 return
-        self._send(200, json.dumps({"ok": True, "done": done}))
+        self._send(200, json.dumps({"ok": True, "done": done, "status": 'submitted' if mode == 'open' else 'completed',
+                                   "results": results}))
 
 
 def main():

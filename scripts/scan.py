@@ -157,64 +157,52 @@ def scan_macos():
 # ======================================================================
 # Windows  (真机实测：Windows 11 + Python 3.12，纯标准库 os / shutil / ctypes)
 # ======================================================================
-def dir_size_bytes(path):
-    """Recursive size in bytes via os.scandir. Skips symlinks/junctions and unreadable."""
-    total = 0
+def merge_coverage(target, source):
+    """Keep per-target diagnostics; hotspot views overlap and must not be summed."""
+    if target is None:
+        return
+    target.setdefault('size_basis', source['size_basis'])
+    for key in ('denied_count', 'skipped_reparse_count'):
+        target[key] = target.get(key, 0) + source[key]
+    for key, cap in (('denied', 500), ('skipped_reparse', 100)):
+        target.setdefault(key, []).extend(source.get(key, [])[:max(0, cap - len(target.get(key, [])))])
+    target.setdefault('groups', {}).update(source.get('groups', {}))
+    target.setdefault('volumes', []).extend(source.get('volumes', []))
+    target['denied_sample_truncated'] = target['denied_count'] > len(target['denied'])
+    target['status'] = 'partial' if target['denied_count'] else 'complete_with_exclusions'
+
+
+def dir_size_bytes(path, coverage=None):
+    """Logical bytes, without following links; optionally preserve read failures."""
+    from scan_windows_full import scan_roots
+    _, diagnostics = scan_roots([path], {})
+    merge_coverage(coverage, diagnostics)
+    return sum(row['bytes'] for row in diagnostics['volumes'])
+
+
+def optional_path_present(path):
+    """Skip absent optional targets, but let the walker record access failures."""
     try:
-        with os.scandir(api_path(path)) as it:
-            for e in it:
-                try:
-                    if e.is_symlink():
-                        continue
-                    st = e.stat(follow_symlinks=False)
-                    # Windows junctions/symlinks carry FILE_ATTRIBUTE_REPARSE_POINT
-                    # (0x400); following them double-counts (e.g. "Local Settings"
-                    # -> AppData\\Local). Attribute absent on macOS -> no-op.
-                    if getattr(st, "st_file_attributes", 0) & 0x400:
-                        continue
-                    if e.is_file(follow_symlinks=False):
-                        total += st.st_size
-                    elif e.is_dir(follow_symlinks=False):
-                        total += dir_size_bytes(e.path)
-                except (PermissionError, OSError):
-                    continue
-    except (PermissionError, OSError):
+        os.stat(api_path(path), follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
         pass
-    return total
+    return True
 
 
-def scandir_children(path, min_kb=51200, limit=40):
-    """Size every immediate child of `path` via os.scandir. Windows."""
-    if not path or not os.path.isdir(api_path(path)):
+def scandir_children(path, min_kb=51200, limit=40, coverage=None):
+    """Size immediate children using the same guarded walker as full scans."""
+    if not path:
         return []
-    results = []
-    try:
-        entries = sorted(os.listdir(api_path(path)))
-    except PermissionError:
-        return [{"name": "(permission denied)", "path": path,
-                 "size_kb": 0, "size_h": "?", "denied": True}]
-    for name in entries:
-        child = os.path.join(path, name)
-        if os.path.islink(api_path(child)):
-            continue
-        try:
-            # islink() is False for Windows junctions; the reparse attribute
-            # (0x400) is the reliable marker. Absent on macOS -> no-op.
-            if getattr(os.stat(api_path(child), follow_symlinks=False),
-                       "st_file_attributes", 0) & 0x400:
-                continue
-        except OSError:
-            continue
-        try:
-            kb = (os.path.getsize(api_path(child)) if os.path.isfile(api_path(child))
-                  else dir_size_bytes(child)) // 1024
-        except (PermissionError, OSError):
-            continue
-        if kb < min_kb:
-            continue
-        results.append({"name": name, "path": child, "size_kb": kb, "size_h": human(kb)})
-    results.sort(key=lambda r: r["size_kb"], reverse=True)
-    return results[:limit]
+    from scan_windows_full import scan_roots
+    groups, diagnostics = scan_roots([path], {path: path}, min_kb=min_kb, limit=limit)
+    merge_coverage(coverage, diagnostics)
+    rows = groups[path]
+    if not rows and diagnostics['denied_count']:
+        return [{'name': '(unreadable)', 'path': path, 'size_kb': 0,
+                 'size_h': '?', 'denied': True, 'partial': True}]
+    return rows
 
 
 def list_drives_windows():
@@ -232,23 +220,22 @@ def list_drives_windows():
     return drives
 
 
-def recycle_bin_windows(sysdrive, min_kb=51200):
+def recycle_bin_windows(sysdrive, min_kb=51200, coverage=None):
     """回收站占用，聚合成一项（只读）。
 
     各用户 SID 子目录单独看没有意义，合并成一个「回收站」条目更好分诊：
     它恒为 🟡 —— 清空才真正释放，且里面装的是用户自己删掉的东西。
     """
     base = os.path.join(sysdrive, "$Recycle.Bin")
-    if not os.path.isdir(base):
+    if not optional_path_present(base):
         return []
-    try:
-        children = [e.path for e in os.scandir(base) if e.is_dir(follow_symlinks=False)]
-    except (PermissionError, OSError):
-        return [{"name": "回收站", "path": base, "size_kb": 0, "size_h": "?", "denied": True}]
-    kb = sum(dir_size_bytes(d) for d in children) // 1024
-    if kb < min_kb:
+    detail = {}
+    kb = dir_size_bytes(base, detail) // 1024
+    merge_coverage(coverage, detail)
+    if kb < min_kb and not detail.get('denied_count'):
         return []
-    return [{"name": "回收站", "path": base, "size_kb": kb, "size_h": human(kb)}]
+    return [{"name": "回收站", "path": base, "size_kb": kb, "size_h": human(kb),
+             "partial": bool(detail.get('denied_count'))}]
 
 
 def system_info_windows():
@@ -274,7 +261,7 @@ def system_info_windows():
     return info
 
 
-def scan_windows():
+def scan_windows(coverage=None):
     profile = os.environ.get("USERPROFILE", HOME)
     local = os.environ.get("LOCALAPPDATA", os.path.join(profile, "AppData", "Local"))
     roaming = os.environ.get("APPDATA", os.path.join(profile, "AppData", "Roaming"))
@@ -290,7 +277,7 @@ def scan_windows():
     ]
     groups = {}
     for key, path, floor in targets:
-        groups[key] = scandir_children(path, min_kb=floor)
+        groups[key] = scandir_children(path, min_kb=floor, coverage=coverage)
 
     dev_paths = [
         os.path.join(profile, ".cache"), os.path.join(profile, ".npm"),
@@ -302,19 +289,19 @@ def scan_windows():
     ]
     dev = []
     for path in dev_paths:
-        if not os.path.isdir(path):
+        if not optional_path_present(path):
             continue
-        try:
-            kb = dir_size_bytes(path) // 1024
-        except (PermissionError, OSError):
-            continue
-        if kb < 51200:
+        detail = {}
+        kb = dir_size_bytes(path, detail) // 1024
+        merge_coverage(coverage, detail)
+        if kb < 51200 and not detail.get('denied_count'):
             continue
         dev.append({"name": os.path.basename(path.rstrip("\\/")) or path,
-                    "path": path, "size_kb": kb, "size_h": human(kb)})
+                    "path": path, "size_kb": kb, "size_h": human(kb),
+                    "partial": bool(detail.get('denied_count'))})
     dev.sort(key=lambda r: r["size_kb"], reverse=True)
     groups["dev_caches"] = dev
-    groups["recycle_bin"] = recycle_bin_windows(sysdrive)
+    groups["recycle_bin"] = recycle_bin_windows(sysdrive, coverage=coverage)
     return system_info_windows(), groups
 
 
@@ -347,7 +334,8 @@ def main():
             groups, diagnostics = scan_roots(roots, watch_paths(roots), progress=progress if args.progress else None)
             system = system_info_windows()
         else:
-            system, groups = scan_windows()
+            diagnostics = {}
+            system, groups = scan_windows(coverage=diagnostics)
     else:
         print(json.dumps({"error": "unsupported_platform", "platform": sys.platform,
                           "message": "scan.py supports macOS and Windows only."},
@@ -361,7 +349,7 @@ def main():
     }
     if diagnostics is not None:
         data['coverage'] = diagnostics
-        data['scan_scope'] = 'all_local_fixed_volumes'
+        data['scan_scope'] = 'all_local_fixed_volumes' if args.all_drives else 'windows_hotspots'
     # Windows: read-only probe of system-level space that the hot-spot groups
     # cannot see (WinSxS / DriverStore / update caches / recovery / hiberfil...).
     # Failure here must never invalidate the main scan.

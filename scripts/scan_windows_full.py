@@ -59,6 +59,7 @@ def scan_roots(roots, watches, min_kb=51200, limit=80, progress=None):
     for key, path in watches.items():
         by_path.setdefault(os.path.normcase(os.path.abspath(path)), []).append(key)
     diagnostics = {'denied_count': 0, 'denied': [], 'skipped_reparse_count': 0,
+                   'skipped_reparse': [], 'groups': {},
                    'size_basis': 'logical file bytes; hard links not deduplicated',
                    'volumes': []}
     last_progress = 0
@@ -66,10 +67,19 @@ def scan_roots(roots, watches, min_kb=51200, limit=80, progress=None):
     def failed(path, exc, active):
         diagnostics['denied_count'] += 1
         if len(diagnostics['denied']) < 500:
-            diagnostics['denied'].append({'path': path, 'error': str(exc)})
+            reason = ('permission_denied' if isinstance(exc, PermissionError) else
+                      'not_found' if isinstance(exc, FileNotFoundError) else 'io_error')
+            diagnostics['denied'].append({'path': path, 'error': str(exc), 'reason': reason})
         for row in active:
             row['partial'] = True
             row['denied_count'] = row.get('denied_count', 0) + 1
+
+    def skipped(path, active):
+        diagnostics['skipped_reparse_count'] += 1
+        if len(diagnostics['skipped_reparse']) < 100:
+            diagnostics['skipped_reparse'].append(path)
+        for row in active:
+            row['skipped_reparse_count'] = row.get('skipped_reparse_count', 0) + 1
 
     for root in roots:
         stats = {'root': root, 'files': 0, 'directories': 0, 'bytes': 0}
@@ -80,7 +90,7 @@ def scan_roots(roots, watches, min_kb=51200, limit=80, progress=None):
             try:
                 root_stat = os.stat(api_path(path), follow_symlinks=False)
                 if stat.S_ISLNK(root_stat.st_mode) or getattr(root_stat, 'st_file_attributes', 0) & 0x400:
-                    diagnostics['skipped_reparse_count'] += 1
+                    skipped(path, active)
                     continue
                 keys = by_path.get(os.path.normcase(path), [])
                 stats['directories'] += 1
@@ -96,9 +106,7 @@ def scan_roots(roots, watches, min_kb=51200, limit=80, progress=None):
                         try:
                             info = entry.stat(follow_symlinks=False)
                             if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
-                                diagnostics['skipped_reparse_count'] += 1
-                                for row in child_active:
-                                    row['skipped_reparse_count'] = row.get('skipped_reparse_count', 0) + 1
+                                skipped(child_path, child_active)
                                 continue
                             if stat.S_ISDIR(info.st_mode):
                                 stack.append((child_path, child_active))
@@ -123,12 +131,17 @@ def scan_roots(roots, watches, min_kb=51200, limit=80, progress=None):
     for key, entries in groups.items():
         rows = []
         for row in entries.values():
-            if row['size_bytes'] >= min_kb * 1024 or row.get('partial'):
+            if row['size_bytes'] >= min_kb * 1024 or row.get('partial') or row.get('skipped_reparse_count'):
                 row['size_kb'] = row['size_bytes'] // 1024
                 value = row['size_bytes'] / 1024**3
                 row['size_h'] = f'{value:.2f} GB' if value >= 1 else f'{row["size_bytes"]/1024**2:.1f} MB'
                 rows.append(row)
         rows.sort(key=lambda row: row['size_bytes'], reverse=True)
         output[key] = rows[:limit]
+        diagnostics['groups'][key] = {'path': watches[key], 'min_kb': min_kb,
+                                      'limit': limit, 'children_seen': len(entries),
+                                      'below_threshold': len(entries) - len(rows),
+                                      'omitted_by_limit': max(0, len(rows) - limit)}
     diagnostics['denied_sample_truncated'] = diagnostics['denied_count'] > len(diagnostics['denied'])
+    diagnostics['status'] = 'partial' if diagnostics['denied_count'] else 'complete_with_exclusions'
     return output, diagnostics
