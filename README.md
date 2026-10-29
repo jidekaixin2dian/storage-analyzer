@@ -22,6 +22,12 @@
 3. **交互报告**：`server.py` 生成本地网页报告 —— 分段磁盘条、Top 占用排行、可折叠卡片、删除按钮（每次点击都有确认弹窗，🟢 可移回收站/直接删，🟡 仅回收站，🔴 只提供"打开去卸载"）；
 4. **安全模型**：三套白名单（rm/trash/open 权限从严到宽）+ 会话 token + Host 校验 + realpath 越界拦截，删除接口无法被用于白名单之外的任何路径。
 
+## v1.4.0 更新
+
+本版完善“扫描 → 看懂依据 → 确认操作 → 理解结果”的主流程：Windows 热点扫描保留覆盖与遗漏信息；报告展示建议依据，调整桌面与手机布局；操作逐路径区分完成、取消、失败和未执行，部分完成后保留待处理入口。另修复报告特殊字符嵌入，并明确 DISM 为可选专项诊断，普通扫描不会调用或自动提权。
+
+复现方法见 [受控案例](docs/controlled-case.md)，完整改动与验证范围见 [v1.4.0 Release](https://github.com/jidekaixin2dian/storage-analyzer/releases/tag/v1.4.0)。回收站结果使用隔离案例模拟，不代表各平台真实桌面验收；移入回收站不等于空间已释放。
+
 ## 安装
 
 把本仓库克隆到你的 agent skills 目录（以 Claude Code / pi 等支持 Agent Skills 的环境为例）：
@@ -54,7 +60,7 @@ python scripts/scan.py --all-drives --progress --output storage_scan_full.json
 python scripts/server.py storage_analysis.json
 ```
 
-报告页面右下角有服务健康状态灯（每 8 秒心跳），服务断开时页面会明确提示，而不是笼统的「Failed to fetch」。
+报告页面顶部有服务健康状态（每 8 秒心跳），服务断开时页面会明确提示，而不是笼统的「Failed to fetch」。
 
 整机模式每盘只遍历一次，热点统计复用该次遍历；`coverage` 列出访问失败与跳过的 reparse/junction 数量，不把权限不足当成空目录。报告大小为逻辑文件长度，硬链接和压缩可能与物理占用不同。扫描本身不删除文件；只有用户明确要求清理时才处理核实过的目标。`.cache`、Temp 和已安装依赖不按名称整体清空。
 
