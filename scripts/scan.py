@@ -19,8 +19,11 @@ Output shape (same on both OSes):
 }
 """
 import json
+import logging
 import os
+import re
 import shutil
+import subprocess
 import sys
 import time
 from scan_windows_full import api_path
@@ -40,10 +43,6 @@ def human(kb):
 # ======================================================================
 # macOS
 # ======================================================================
-import re
-import subprocess
-
-
 def run(cmd, timeout=180):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
@@ -133,8 +132,8 @@ def system_info_macos():
     try:
         t, u, f = shutil.disk_usage("/")
         total, used, free = human(t // 1024), human(u // 1024), human(f // 1024)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.warning("disk_usage failed for / (%s): %s", type(exc).__name__, exc)
     info["disk_total"], info["disk_used"], info["disk_free"] = total, used, free
     dinfo = run(["diskutil", "info", "/"])
     fs = re.search(r"File System Personality:\s*(.+)", dinfo)
@@ -215,7 +214,8 @@ def list_drives_windows():
                 t, u, f = shutil.disk_usage(root)
                 drives.append({"name": root, "total": human(t // 1024),
                                "used": human(u // 1024), "free": human(f // 1024)})
-            except Exception:
+            except Exception as exc:
+                logging.warning("disk_usage failed for %s (%s): %s", root, type(exc).__name__, exc)
                 continue
     return drives
 
@@ -251,8 +251,8 @@ def system_info_windows():
     try:
         t, u, f = shutil.disk_usage(sysdrive)
         total, used, free = human(t // 1024), human(u // 1024), human(f // 1024)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.warning("disk_usage failed for %s (%s): %s", sysdrive, type(exc).__name__, exc)
     info["disk_total"], info["disk_used"], info["disk_free"] = total, used, free
     info["filesystem"] = "NTFS"
     info["purgeable"] = ""
@@ -340,7 +340,7 @@ def main():
         print(json.dumps({"error": "unsupported_platform", "platform": sys.platform,
                           "message": "scan.py supports macOS and Windows only."},
                          ensure_ascii=False))
-        return
+        raise SystemExit(2)
     data = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "system": system,
