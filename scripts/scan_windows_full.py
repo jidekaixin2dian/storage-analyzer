@@ -24,6 +24,8 @@ def display_path(path):
 
 def fixed_drives():
     """Only local fixed volumes; never traverse a mapped network drive implicitly."""
+    if os.name != 'nt':
+        return []
     import ctypes
     return [f'{letter}:\\' for letter in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
             if ctypes.windll.kernel32.GetDriveTypeW(f'{letter}:\\') == 3]

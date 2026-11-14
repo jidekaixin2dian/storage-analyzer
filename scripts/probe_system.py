@@ -201,7 +201,7 @@ def system_files_by_drive(names=SYSTEM_FILE_NAMES):
             path = os.path.join(drive, name)
             measured = _stat_path(path)
             if measured.get("present") and (measured.get("size_bytes") or 0) > 0:
-                rows.append({"path": path, "drive": drive.rstrip("\\"),
+                rows.append({"path": path, "drive": drive.rstrip("/\\"),
                              "name": name,
                              "size_bytes": int(measured["size_bytes"]),
                              "size_h": format_size(measured["size_bytes"])})
@@ -605,7 +605,7 @@ def collect(include_driver_usage=True):
     m = combine_rows(page_rows)
     page_note = ("不建议删除或手工缩小；大小由系统按内存压力管理，"
                  "调整应在「系统属性 > 高级 > 性能」里做。")
-    if any(row["drive"].rstrip("\\").upper() != SYSTEM_DRIVE.rstrip("\\").upper()
+    if any(row["drive"].rstrip("/\\").upper() != SYSTEM_DRIVE.rstrip("/\\").upper()
            for row in page_rows):
         page_note += (" 其中分页文件位于非系统盘：该盘的「已用」会随内存压力在数 GB 内浮动，"
                       "两次读数不一致属于正常，不能算作可回收空间。")

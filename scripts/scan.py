@@ -246,7 +246,7 @@ def recycle_bins_all_drives(drives, min_kb=1024, coverage=None):
     """
     rows = []
     for drive in drives:
-        label = "回收站（%s）" % drive.rstrip(os.sep)
+        label = "回收站（%s）" % drive.rstrip("/\\")
         rows.extend(recycle_bin_windows(drive, min_kb=min_kb,
                                         coverage=coverage, label=label))
     rows.sort(key=lambda row: row["size_kb"], reverse=True)
