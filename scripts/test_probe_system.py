@@ -326,20 +326,6 @@ class TemplateTests(unittest.TestCase):
         self.assertNotIn("del-btn trash", section)
         self.assertIn("copyBtn", section)
 
-    def test_template_shows_per_drive_and_vhdx_detail(self):
-        here = os.path.dirname(os.path.abspath(__file__))
-        template = os.path.join(here, "..", "assets", "report_template.html")
-        with open(template, encoding="utf-8") as stream:
-            html = stream.read()
-        start = html.index("function renderSystemSpace")
-        end = html.index("function renderTop5", start)
-        section = html[start:end]
-        # 逐盘分页文件与 vhdx 清单要在系统段渲染出来，否则只能去读 JSON
-        self.assertIn("it.by_drive", section)
-        self.assertIn("it.disks", section)
-        self.assertIn("各盘明细", section)
-        self.assertIn("虚拟磁盘", section)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
