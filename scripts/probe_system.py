@@ -40,10 +40,16 @@ import tempfile
 import time
 
 try:
-    from scan_windows_full import api_path
+    from scan_windows_full import api_path, display_path, fixed_drives
 except Exception:  # standalone use from another cwd
     def api_path(path):
         return path
+
+    def display_path(path):
+        return path
+
+    def fixed_drives():
+        return [SYSTEM_DRIVE] if os.name == "nt" else []
 
 IS_WINDOWS = os.name == "nt"
 WINDIR = os.environ.get("SystemRoot", r"C:\Windows")
@@ -176,6 +182,107 @@ def _combine(paths):
         for key in ("size_bytes", "files", "denied", "skipped_reparse"):
             result[key] += one[key]
     return result
+
+
+SYSTEM_FILE_NAMES = ("pagefile.sys", "swapfile.sys", "hiberfil.sys")
+
+
+def system_files_by_drive(names=SYSTEM_FILE_NAMES):
+    """Measure page/swap/hibernation files on every fixed drive.
+
+    A machine can host its only page file on a non-system volume; that file then
+    moves with memory pressure and makes the drive's "used" number jump by
+    several GB between two readings. Measuring C: only reports nothing and
+    invites reading the gap as reclaimable space.
+    """
+    rows = []
+    for drive in fixed_drives():
+        for name in names:
+            path = os.path.join(drive, name)
+            measured = _stat_path(path)
+            if measured.get("present") and (measured.get("size_bytes") or 0) > 0:
+                rows.append({"path": path, "drive": drive.rstrip("\\"),
+                             "name": name,
+                             "size_bytes": int(measured["size_bytes"]),
+                             "size_h": format_size(measured["size_bytes"])})
+    rows.sort(key=lambda r: r["size_bytes"], reverse=True)
+    return rows
+
+
+def combine_rows(rows):
+    """Collapse per-drive rows into one measured dict (plus the row list)."""
+    result = {"present": bool(rows), "size_bytes": 0, "files": 0,
+              "denied": 0, "skipped_reparse": 0}
+    for row in rows:
+        result["size_bytes"] += row["size_bytes"]
+        result["files"] += 1
+    result["by_drive"] = rows
+    return result
+
+
+WSL_PACKAGE_HINTS = ("canonicalgroup", "ubuntu", "debian", "kali", "suse",
+                     "alpine", "oraclelinux", "rockylinux", "archlinux")
+
+
+def wsl_virtual_disks():
+    """Locate WSL / container VHDX files (read-only metadata only).
+
+    A VHDX grows but never shrinks when files are deleted inside the distro, so
+    its size is an upper bound on what the guest actually stores. Compacting
+    needs an export/unregister/import cycle; `--set-sparse` only affects blocks
+    freed afterwards.
+    """
+    local = os.environ.get("LOCALAPPDATA", "")
+    search_dirs = []
+    if local:
+        search_dirs.append(os.path.join(local, "wsl"))
+        search_dirs.append(os.path.join(local, "Docker", "wsl"))
+        packages = os.path.join(local, "Packages")
+        if os.path.isdir(api_path(packages)):
+            try:
+                with os.scandir(api_path(packages)) as it:
+                    for entry in it:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        if any(h in entry.name.lower() for h in WSL_PACKAGE_HINTS):
+                            search_dirs.append(os.path.join(entry.path, "LocalState"))
+            except OSError:
+                pass
+    found = []
+    for root in search_dirs:
+        api_root = api_path(root)
+        if not os.path.isdir(api_root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(api_root):
+            # Depth is measured against the walk root: api_path() adds a \\?\
+            # prefix that would otherwise inflate the separator count.
+            rel = os.path.relpath(dirpath, api_root)
+            depth = 0 if rel == os.curdir else rel.count(os.sep) + 1
+            if depth > 2:
+                dirnames[:] = []
+                continue
+            for name in filenames:
+                if not name.lower().endswith(".vhdx"):
+                    continue
+                full = os.path.join(dirpath, name)
+                measured = _stat_path(full)
+                if not measured.get("present"):
+                    continue
+                found.append({"path": display_path(full),
+                              "size_bytes": int(measured["size_bytes"]),
+                              "size_h": format_size(measured["size_bytes"]),
+                              "modified": time.strftime(
+                                  "%Y-%m-%d %H:%M",
+                                  time.localtime(_mtime(full)))})
+    found.sort(key=lambda r: r["size_bytes"], reverse=True)
+    return found
+
+
+def _mtime(path):
+    try:
+        return os.stat(api_path(path)).st_mtime
+    except OSError:
+        return 0
 
 
 # ----------------------------------------------------------------------
@@ -390,7 +497,7 @@ RISK_LABELS = {"low": "低风险", "medium": "中风险", "high": "高风险"}
 
 
 def _item(item_id, name, path, measured, kind, risk, brief, note,
-          command=None, admin_required=True, link=None):
+          command=None, admin_required=True, link=None, extra=None):
     entry = {
         "id": item_id,
         "name": name,
@@ -413,6 +520,9 @@ def _item(item_id, name, path, measured, kind, risk, brief, note,
         entry["skipped_reparse"] = int(measured["skipped_reparse"])
     if link:
         entry["link"] = link
+    for key, value in (extra or {}).items():
+        if value:
+            entry[key] = value
     return entry
 
 
@@ -477,28 +587,35 @@ def collect(include_driver_usage=True):
         "必须先运行 reagentc /info 确认。",
         command="reagentc /info"))
 
-    # 5. hibernation
-    m = _stat_path(os.path.join(SYSTEM_DRIVE, "hiberfil.sys"))
+    # 5. hibernation (any fixed drive)
+    hiber_rows = system_files_by_drive(("hiberfil.sys",))
+    m = combine_rows(hiber_rows)
     items.append(_item(
         "hiberfil", "休眠文件（hiberfil.sys）",
         os.path.join(SYSTEM_DRIVE, "hiberfil.sys"), m,
         "hibernation", "medium",
         "休眠与快速启动使用的内存镜像。",
         ("当前未检测到休眠文件（休眠可能已关闭）。" if not m["present"] else
-         "关闭休眠会同时关闭快速启动；笔记本会失去合盖休眠能力。"),
-        command="powercfg /h off"))
+         "关闭休眠会同时关闭快速启动；笔记本会失去合盖休眠能力。"
+         + (" 检测到非系统盘上也有休眠文件，请逐个确认。" if len(hiber_rows) > 1 else "")),
+        command="powercfg /h off", extra={"by_drive": hiber_rows}))
 
-    # 6. page file
-    m = _combine([os.path.join(SYSTEM_DRIVE, "pagefile.sys"),
-                  os.path.join(SYSTEM_DRIVE, "swapfile.sys")])
+    # 6. page / swap files (any fixed drive: the only page file often lives off C:)
+    page_rows = system_files_by_drive(("pagefile.sys", "swapfile.sys"))
+    m = combine_rows(page_rows)
+    page_note = ("不建议删除或手工缩小；大小由系统按内存压力管理，"
+                 "调整应在「系统属性 > 高级 > 性能」里做。")
+    if any(row["drive"].rstrip("\\").upper() != SYSTEM_DRIVE.rstrip("\\").upper()
+           for row in page_rows):
+        page_note += (" 其中分页文件位于非系统盘：该盘的「已用」会随内存压力在数 GB 内浮动，"
+                      "两次读数不一致属于正常，不能算作可回收空间。")
     items.append(_item(
         "pagefile", "页面文件 / 交换文件",
-        "C:\\pagefile.sys / swapfile.sys", m,
+        "各固定盘根目录 pagefile.sys / swapfile.sys", m,
         "pagefile", "high",
         "系统管理的虚拟内存与交换文件。",
-        "不建议删除或手工缩小；大小由系统按内存压力管理，"
-        "调整应在「系统属性 > 高级 > 性能」里做。", command=None,
-        admin_required=True))
+        page_note, command=None, admin_required=True,
+        extra={"by_drive": page_rows}))
 
     # 7. Windows.old leftovers
     old_paths = [os.path.join(SYSTEM_DRIVE, "Windows.old"),
@@ -566,6 +683,24 @@ def collect(include_driver_usage=True):
         "安装器与服务留下的临时文件；部分文件可能正被占用。",
         "可清理，但正在运行的服务可能锁住文件；失败项保留即可，不要强删。",
         command=None))
+
+    # 13. WSL / container virtual disks
+    disks = wsl_virtual_disks()
+    m = {"present": bool(disks),
+         "size_bytes": sum(d["size_bytes"] for d in disks),
+         "files": len(disks)}
+    items.append(_item(
+        "wsl_vhdx", "WSL / 容器虚拟磁盘（ext4.vhdx）",
+        "AppData\\Local\\wsl / Packages\\*\\LocalState / Docker\\wsl", m,
+        "virtual-disk", "medium",
+        "WSL 发行版与容器把整个 Linux 文件系统装在一个会增长、不会自己缩小的虚拟磁盘里。"
+        "在发行版内删文件，Windows 这边的 vhdx 体积不会跟着变小。",
+        ("未检测到 WSL/容器虚拟磁盘。" if not m["present"] else
+         "vhdx 体积是上限而不是「已用」；要真正回收，先 wsl --export 备份，"
+         "再 wsl --unregister 删盘、wsl --import 重新导入，最后 "
+         "wsl --manage <发行版> --set-sparse true（该参数只对之后删除的块生效，"
+         "对已有数据使用需 --allow-unsafe 且有损坏风险，必须先有可校验的导出备份）。"),
+        command="wsl --list --verbose", extra={"disks": disks}))
 
     denied = sum(item.get("denied", 0) for item in items)
     skipped = sum(item.get("skipped_reparse", 0) for item in items)

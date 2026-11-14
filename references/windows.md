@@ -30,7 +30,8 @@ Windows 目录可能包含尾部空格/点或超过传统长度限制；扫描�
 | `%USERPROFILE%\.cache`、`.gradle`、`.m2`、`.nuget\packages`、uv、ms-playwright | 可能混合下载缓存、模型、工具运行时和已安装依赖 | 先区分所有者与作用，不能整体列绿灯；优先工具自己的缓存清理入口 |
 | `C:\Program Files`、`Program Files (x86)` | 应用本体 | 🔴 仅重复/想卸时上灯，否则归蓝色 |
 | `%USERPROFILE%\Downloads` 的安装包 | 下载文件、可能尚未安装或唯一的离线包 | 只对已确认完成安装且可重新取得的残留列 🟢；其余 🟡 |
-| `C:\$Recycle.Bin`（扫描已聚合成 `recycle_bin` 组） | 用户自己删掉的东西 | 🟡 只给文字处置：设置 > 存储 > 临时文件、`cleanmgr`、资源管理器右键清空。它在 HOME 外，**不要填进 `path`/`trash_paths`**，白名单会拒、按钮是死的 |
+| `C:\$Recycle.Bin`（每盘一项，扫描聚合成 `recycle_bin` 组） | 用户自己删掉的东西 | 🟡 只给文字处置：设置 > 存储 > 临时文件、`cleanmgr`、资源管理器右键清空。它在 HOME 外，**不要填进 `path`/`trash_paths`**，白名单会拒、按钮是死的。清空前先导一份内容清单（名称 + 体积 + 删除时间），否则事后答不上「那个文件是不是被清掉了」 |
+| `%LOCALAPPDATA%\JetBrains\<产品>\{index,caches,jcef_cache,log,tmp}` | IDE 索引与缓存，项目重开即重建 | 扫描单列 `ide_caches` 组；关掉 IDE 后可清 🟢（实测 PyCharm index 单目录 633 MB + caches 157 MB） |
 
 ## 系统占用（不上灯，单独成段）
 
@@ -42,13 +43,49 @@ Windows 目录可能包含尾部空格/点或超过传统长度限制；扫描�
 | Installer 缓存 | `C:\Windows\Installer` | 可读 | 孤立 msp 需专门工具按注册表核对，不按文件名删 |
 | 驱动仓库 | `...\DriverStore\FileRepository` | 可读 | `pnputil /enum-devices /drivers` 核对；未匹配当前设备 ≠ 可删 |
 | 恢复分区 | GPT Recovery 分区 | 可读分区大小 | `reagentc /info` 需管理员 |
-| 休眠文件 | `C:\hiberfil.sys` | 可读 | `powercfg /h off`（同时关闭快速启动） |
-| 页面文件 | `pagefile.sys` / `swapfile.sys` | 可读 | 系统管理，不建议手删 |
+| 休眠文件 | 各固定盘根目录 `hiberfil.sys` | 可读 | `powercfg /h off`（同时关闭快速启动） |
+| 页面文件 | 各固定盘根目录 `pagefile.sys` / `swapfile.sys` | 可读 | 系统管理，不建议手删。**必须逐盘测**：实测本机唯一的分页文件压在 `F:` 上、20.99 GB，而 C: 只有 256 MB 的 swapfile；只测 C: 会把它报成 256 MB，还让 F 盘「已用」看起来忽大忽小 |
 | Windows.old | `C:\Windows.old`、`$Windows.~BT`、`$Windows.~WS` | 可读 | `cleanmgr` / 设置 > 系统 > 存储 |
 | 更新与传递优化缓存 | `SoftwareDistribution\Download`、`DeliveryOptimization` | 可读 | `cleanmgr`；直接删需先停 wuauserv / DOSvc |
 | 崩溃转储/WER/日志/Prefetch/系统 Temp | 各自路径 | 可读 | 低收益，按需清理 |
 
 **尺寸 ≠ 可回收量**：WinSxS 的目录求和可能重复计算硬链接，不能代表独占磁盘占用。DISM 可提供考虑硬链接后的实际大小、共享部分、可回收包数量与清理建议，但不能据此承诺精确可释放字节数。详见 [微软对组件存储大小的说明](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/determine-the-actual-size-of-the-winsxs-folder)。不要把系统项写进 `path` 或 `trash_paths`：它们在 `$HOME` 外，白名单会拒，按钮是死的。
+
+## 虚拟磁盘（WSL / 容器）
+
+`system_space` 的 `wsl_vhdx` 项会列出 `%LOCALAPPDATA%\wsl`、`Docker\wsl` 与 `Packages\<WSL 发行版包>\LocalState` 下的 `*.vhdx`。判读要点：
+
+- vhdx 只增不减：在发行版里删文件，Windows 侧体积不动，所以 **vhdx 大小是上限，不是「已用」**。必须拿发行版内部的实际用量对照（`wsl -d <发行版> -- df -h /`）。实测一次极端情形是 37.40 GB 的盘里只装了 13 GB，压缩后一次归还 24.74 GB——历次清理里单笔最大的一笔。
+- 回收块要导出/注销/重导，不是删文件：
+  1. `wsl --export <发行版> <备份.tar>`（先备份，并核对成员可读、尾部结束标记完整）
+  2. `wsl --unregister <发行版>`（这一步才真正删掉旧 vhdx）
+  3. `wsl --import <发行版> <新目录> <备份.tar> --version 2`
+  4. `wsl --manage <发行版> --set-sparse true --allow-unsafe`（新盘已稀疏，之后删文件才会自动归还）
+- `--set-sparse` 对**存量**块无效：在非稀疏盘上开通它不会回收任何已占用空间（实测 fstrim 后只多出 0.16 GB），而且官方要求 `--allow-unsafe`，对已有数据有损坏风险——必须先有可校验的导出备份再动手。
+- 换过 vhdx 路径后，硬编码旧 GUID 目录的脚本要同步改；备份 tar 确认 WSL 可用后再删。
+
+## 反复出现的再生残留
+
+这些是每轮清理都会重新长出来、删掉又不影响任何已装软件的东西。扫描不会自动替它们下结论，按路径核实：
+
+| 位置 | 是什么 | 处置 |
+|---|---|---|
+| `%TEMP%\.net\<产品>` | .NET 单文件自解压残留（FpsTune 一类每次启动解一遍） | 关掉该程序后删 🟢；实测常年 1.5 GB、8 份并存 |
+| `%TEMP%\LHDCX_ASUS_DLL.*`、`apex-*`、`node-compile-cache`、`vscode-stable-*`、`PotUpdate`、`DiagOutputDir` | 各安装器/更新器的一次性解包目录 | 按时间逐个删 🟢；个别 DLL 被占用会失败，失败项保留即可 |
+| `%LOCALAPPDATA%\@<应用>-updater\installer.exe` | Electron 类应用已安装的更新包（DSH、ZCode 等） | 对应版本已在跑就删 🟢，实测两个应用合计 512 MB |
+| `%USERPROFILE%\.cache\codex-runtimes\*-runtime.previous-<uuid>` | 上一版运行时副本，每次升级留一份 | 只留当前 `*-runtime`，其余删 🟢（实测 4×112 MB） |
+| `%USERPROFILE%\.codex\*.sqlite.bak-<时间戳>` | 数据库迁移/备份留下的显式 `.bak` | 当前库完好时删 🟢（实测单文件 825 MB） |
+| 仓库 `work\`、`dist\`、`build\` 下的 `*-backup-<时间戳>` 目录、`work\rc*` / `work\alpha*` 检出副本 | 反复装测/回归留下的安装副本与候选版本检出 | 先确认 `git status` 干净、`git log <tag> --not --remotes` 为空（疑似在 tag 上、无未推送提交），再保留最新 1–2 份、其余删 🟢 |
+
+## 体积口径：逻辑大小 ≠ 实际释放
+
+- 报告里的目录大小是**逻辑文件字节**，含硬链接重复计算；pnpm/npm 的 store 与项目 `node_modules` 之间大量硬链接，`pnpm store prune` 报「移除 2.52 GB」时磁盘实际少的通常更少。判断释放量以盘符可用空间前后差为准，不要拿逻辑体积相加当战绩。
+- 一处数据可以同时出现在多个热点分组里（`drive_C`、`user_profile`、`appdata_local`），**分组间不能相加**。
+- NTFS 压缩、稀疏文件、去重都会让逻辑大小偏离物理占用。
+
+## 产物放哪：别只留 `%TEMP%`
+
+`%TEMP%` 会被系统的存储感知任务清空——上一轮把审计日志写在 `%TEMP%`，中途被清掉后只能凭命令输出重写记录。扫描 JSON、分析 JSON、清理日志放到工作区的持久目录（例如 `work\storage-cleanup-<日期>\`），报告里引用那些路径；临时目录只用于一次性的中间文件。
 
 ## 管理员只读分析（系统空间）
 

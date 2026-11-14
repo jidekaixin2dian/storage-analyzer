@@ -220,7 +220,7 @@ def list_drives_windows():
     return drives
 
 
-def recycle_bin_windows(sysdrive, min_kb=51200, coverage=None):
+def recycle_bin_windows(sysdrive, min_kb=51200, coverage=None, label="回收站"):
     """回收站占用，聚合成一项（只读）。
 
     各用户 SID 子目录单独看没有意义，合并成一个「回收站」条目更好分诊：
@@ -234,8 +234,55 @@ def recycle_bin_windows(sysdrive, min_kb=51200, coverage=None):
     merge_coverage(coverage, detail)
     if kb < min_kb and not detail.get('denied_count'):
         return []
-    return [{"name": "回收站", "path": base, "size_kb": kb, "size_h": human(kb),
+    return [{"name": label, "path": base, "size_kb": kb, "size_h": human(kb),
              "partial": bool(detail.get('denied_count'))}]
+
+
+def recycle_bins_all_drives(drives, min_kb=1024, coverage=None):
+    """每个固定盘一个回收站条目。
+
+    全盘扫描只给 drive_* 分组时，回收站会整体漏出视野——而它恰好是「已删除
+    但还占着空间」最集中的地方，所以必须逐盘列出来。
+    """
+    rows = []
+    for drive in drives:
+        label = "回收站（%s）" % drive.rstrip(os.sep)
+        rows.extend(recycle_bin_windows(drive, min_kb=min_kb,
+                                        coverage=coverage, label=label))
+    rows.sort(key=lambda row: row["size_kb"], reverse=True)
+    return rows
+
+
+IDE_CACHE_SUBDIRS = ("index", "caches", "compile-server", "jcef_cache",
+                     "log", "tmp")
+
+
+def ide_caches_windows(local, coverage=None):
+    """JetBrains 系 IDE 的索引/缓存子目录（项目重开即重建）。"""
+    base = os.path.join(local, "JetBrains")
+    if not optional_path_present(base):
+        return []
+    try:
+        products = [entry.path for entry in os.scandir(api_path(base))
+                    if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
+    rows = []
+    for product in products:
+        for sub in IDE_CACHE_SUBDIRS:
+            path = os.path.join(product, sub)
+            if not optional_path_present(path):
+                continue
+            detail = {}
+            kb = dir_size_bytes(path, detail) // 1024
+            merge_coverage(coverage, detail)
+            if kb < 10240 and not detail.get('denied_count'):
+                continue
+            rows.append({"name": os.path.basename(product) + '\\' + sub,
+                         "path": path, "size_kb": kb, "size_h": human(kb),
+                         "partial": bool(detail.get('denied_count'))})
+    rows.sort(key=lambda row: row["size_kb"], reverse=True)
+    return rows
 
 
 def system_info_windows():
@@ -285,7 +332,8 @@ def scan_windows(coverage=None):
         os.path.join(profile, ".nuget", "packages"), os.path.join(profile, ".cargo"),
         os.path.join(local, "pip", "Cache"), os.path.join(local, "Yarn"),
         os.path.join(local, "uv"), os.path.join(local, "ms-playwright"),
-        os.path.join(local, "go-build"),
+        os.path.join(local, "go-build"), os.path.join(local, "pnpm"),
+        os.path.join(local, "pnpm-cache"),
     ]
     dev = []
     for path in dev_paths:
@@ -301,6 +349,7 @@ def scan_windows(coverage=None):
                     "partial": bool(detail.get('denied_count'))})
     dev.sort(key=lambda r: r["size_kb"], reverse=True)
     groups["dev_caches"] = dev
+    groups["ide_caches"] = ide_caches_windows(local, coverage=coverage)
     groups["recycle_bin"] = recycle_bin_windows(sysdrive, coverage=coverage)
     return system_info_windows(), groups
 
@@ -332,6 +381,9 @@ def main():
             def progress(row):
                 print(json.dumps({'scan_progress': row}, ensure_ascii=True), file=sys.stderr, flush=True)
             groups, diagnostics = scan_roots(roots, watch_paths(roots), progress=progress if args.progress else None)
+            # Full scans only emit drive_* groups; the recycle bin is exactly
+            # where deleted-but-not-freed space hides, so list it per drive.
+            groups["recycle_bin"] = recycle_bins_all_drives(roots, coverage=diagnostics)
             system = system_info_windows()
         else:
             diagnostics = {}

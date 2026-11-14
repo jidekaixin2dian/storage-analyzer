@@ -51,18 +51,20 @@ py -3 scripts\scan.py > "$env:TEMP\storage_scan.json"
 py -3 scripts\scan.py --all-drives --progress --output "$env:TEMP\storage_scan_full.json"
 ```
 
-`--output` 写新 UTF-8 文件并拒绝覆盖，避免旧版 PowerShell 重定向编码问题。`--progress` 只向 stderr 输出进度，stdout 的 JSON 保持干净。此模式跳过网络盘和 reparse/junction，不重复遍历热点目录；查看 `coverage` 中权限失败、跳过链接与各盘扫描数量。体积为逻辑文件大小，硬链接和压缩会使其与物理占用不同。没有权限读取的内容不能称为“已完整扫描”。
+`--output` 写新 UTF-8 文件并拒绝覆盖，避免旧版 PowerShell 重定向编码问题。`--progress` 只向 stderr 输出进度，stdout 的 JSON 保持干净。此模式跳过网络盘和 reparse/junction，不重复遍历热点目录；查看 `coverage` 中权限失败、跳过链接与各盘扫描数量。体积为逻辑文件大小，硬链接和压缩会使其与物理占用不同。没有权限读取的内容不能称为“已完整扫描”。全盘模式只输出 `drive_*` 分组，所以扫描器另外逐盘列出 `recycle_bin`：回收站正是「已经删了但空间还没回来」最集中的地方，不能因为它是系统目录就漏掉。
+
+**产物存到持久目录，不要只放 `%TEMP%`。** `%TEMP%` 会被系统存储感知任务清空，扫描 JSON、分析 JSON 与清理日志写进工作区的 `work\storage-cleanup-<日期>\` 一类目录，`%TEMP%` 只放一次性中间文件。日志被清掉之后，清理审计就只能靠回忆重写。
 
 用户授权管理员补扫时，按 [Windows 管理员只读补扫](references/windows.md#管理员只读补扫) 操作：通过 UAC 只提升扫描子进程，验证实际令牌和完成状态，保留前后结果，更新报告与覆盖说明；不修改 ACL，也不提升清理服务。
 后文示例统一写 `/tmp/...`，Windows 上换成 `$env:TEMP\...`。
 
 `scan.py` 自动识别系统（`sys.platform`）：
 - **macOS**：扫 home、library、caches、containers、group_containers、app_support、applications、downloads、dev_caches，用 `du` 算大小。
-- **Windows**：扫 user_profile、appdata_local、appdata_roaming、temp、downloads、program_files(_x86)、dev_caches、recycle_bin（`C:\$Recycle.Bin` 各用户子目录聚合成一项），用 `os.scandir` 算大小；`system.disks` 含所有盘符。
+- **Windows**：扫 user_profile、appdata_local、appdata_roaming、temp、downloads、program_files(_x86)、dev_caches、ide_caches（JetBrains 各产品的 `index`/`caches`/`jcef_cache`/`log`/`tmp`）、recycle_bin（每盘一项），用 `os.scandir` 算大小；`system.disks` 含所有盘符。
 
 输出 JSON：`system`（系统/磁盘信息，含 `disk_name` 主盘名 + `disks` 全部盘）+ `groups`（各组子目录大小，已降序、过滤 50MB 以下）+ `system_space`（Windows 系统级空间只读探测，见下）。扫描较慢，耐心等。读不到的目录标 `denied`，需在报告里列出并提示遗漏体量。
 
-Windows 的 `system_space` 是扫描时自动附带的只读探测，约 10–20 秒：组件存储（WinSxS）、Installer 缓存、DriverStore、恢复分区、休眠/页面文件、Windows.old、更新缓存、崩溃转储、日志、Prefetch、系统 Temp，以及驱动使用统计。它只报**目录尺寸**，不等于可回收量；不需要时加 `--no-system-probe` 跳过。
+Windows 的 `system_space` 是扫描时自动附带的只读探测，约 10–20 秒：组件存储（WinSxS）、Installer 缓存、DriverStore、恢复分区、休眠/页面文件（**逐盘测**，见 `by_drive`）、Windows.old、更新缓存、崩溃转储、日志、Prefetch、系统 Temp、WSL/容器虚拟磁盘（`wsl_vhdx`），以及驱动使用统计。它只报**目录尺寸**，不等于可回收量；不需要时加 `--no-system-probe` 跳过。
 
 DISM 是可选的 WinSxS 专项诊断，普通扫描不会调用。仅在用户要求分析组件存储、且结果会影响处置判断时，按 [Windows 管理员只读分析](references/windows.md#管理员只读分析系统空间) 获取实际大小、可回收包数量和清理建议。它不能给出精确可释放字节数；不要为了补全报告或消除“未知”而自动提权补跑。跳过、超时或无法解析时继续交付普通报告，不反复重试。UAC 只提升诊断子进程，不提升报告服务。
 
@@ -73,6 +75,13 @@ DISM 是可选的 WinSxS 专项诊断，普通扫描不会调用。仅在用户�
 每个优先建议应通过 `evidence` 写出对应路径的实际观察和判断依据；绿灯可用 `next_step` 补充操作方向，既有 `commands` 会在报告展示。目录很大、名字含 cache、文件扩展名都不能独立证明可安全删除。保留 `size` / `size_estimate` 兼容字段，但只有核实到可处理子路径和估算依据时才填写释放估算；没有依据时不编数字。建议应用内处理时写出该应用的“设置 → 存储 / 缓存管理”等可理解入口，入口未核实时说明需查找，不编造具体菜单名。
 
 先看 `system.os` 判断系统，读对应的数据布局参考：macOS 读 [references/macos.md](references/macos.md)，Windows 读 [references/windows.md](references/windows.md)（讲该系统东西存哪、怎么辨认、归哪一级）。然后读扫描 JSON 做这几件事：
+
+**读数字前先排掉四种假象**（每轮都会遇到的误判来源）：
+
+- **单盘「已用」自己会变** → 分页文件在别处且动态伸缩。实测把 16–24 GB 的分页文件压在非系统盘，几分钟内该盘已用能差 7 GB。逐盘看 `system_space.pagefile.by_drive`，波动不是可回收空间。
+- **虚拟磁盘体积是上限** → `wsl_vhdx` 大不代表能删，拿 `wsl -d <发行版> -- df -h /` 对照；压缩要走导出/注销/重导。
+- **逻辑体积不是释放量** → 硬链接（pnpm store 与 node_modules）会让「移除 2.52 GB」只兑现其中一部分；以盘符可用空间前后差为准。
+- **回收站先看内容再清空** → 清空前导出一份内容清单（名称 + 体积 + 删除时间）存档，事后才答得上「那个文件是不是被清掉了」。
 
 1. **挑 Top 5** 占用大户，判定类型（系统资产/应用本体/应用数据/应用缓存/开发缓存/用户文件/媒体内容/下载内容/虚拟机镜像/回收站/其他）。
 2. **识别"神秘大目录"**：UUID 命名的 Container、不明的隐藏目录，要追查它属于哪个 App、装的是什么（例如某 97GB 的 UUID Container 实为 Bilibili 离线视频缓存）。必要时 `ls`/`du` 深入一层看清楚，但仍只读。
@@ -86,6 +95,16 @@ DISM 是可选的 WinSxS 专项诊断，普通扫描不会调用。仅在用户�
 每个 🟢 项要给：核实依据、精确处理路径、清理前需关闭的进程、可一键复制的清理命令。有可靠依据时再给预估释放空间，不把目录整体大小当收益（用移到废纸篓或 App 自身清理入口的安全方式，谨慎用 `rm`；如用 `rm` 必须是明确的缓存子目录）。
 
 **大小字段写干净**：`size` / `size_estimate` 用"约 14 GB""合计约 8.6 GB"即可——"约"已表示估算，不要再加"（估算）"，重复且不专业（模板也会自动去掉这种冗余括号）。可再生属性已由分级标题和按钮说明覆盖，别塞进大小字段。
+
+**写给人看，别写给工程师看。** 报告面向的是「电脑满了、不知道从哪下手」的人，不是同行：
+
+- 用日常词，别端术语：说「能直接清 / 要你拿主意 / 别手动删」，不要「可自动清理 / 需人工判断 / 谨慎清理」堆在一起；说「删了要重新下载」，不要「不可逆的再生成本」。
+- 一句话讲清是什么、为什么、下一步。每个 `note`、`why_manual`、`disposal` 控制在 1–3 句，别写成排查记录；把「我查了什么、比对了哪几个文件」留在 `evidence` 里，正文不写。
+- 不甩锅、不吓唬、不自证。避免「注意」「务必」「警告」叠用，避免「经过仔细核实我们发现」这类口气；直接说结论和做法。
+- 用户不需要看的词不要出现：`trash_paths`、白名单、realpath、硬链接、逻辑体积、coverage、快照——这些是内部机制，写进 `evidence` 或本文件即可。
+- 中文标点统一，数字后面留空格（`约 6.3 GB`），不要中英混排半句。界面上出现英文只保留命令、路径和产品名。
+
+**页面保持克制。** 一屏先看到「有多少空间、谁占的、先做哪件事」，其余按需展开：条目默认折叠，系统级只读项单独成段，同一屏不超过两种强调色。不要为了「信息完整」把每一项的理由、依据、风险全部摊开——那正是报告看起来杂乱的原因。
 
 ### Step 3 生成交互报告
 
@@ -155,6 +174,13 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
   - 二级护栏收紧：rm/trash 的根目录只认 $HOME，`/Applications` 与 Program Files 仅在 `open` 下放行（此前 rm 也能拿到 /Applications）；
   - 报告文案按系统切换「废纸篓/回收站」「访达/资源管理器」，Windows 上不再显示访达。
   - 新增 `system_space` 只读系统探测（WinSxS / Installer / DriverStore / 恢复分区 / 休眠 / Windows.old / 更新缓存 / 转储 / 日志 / Prefetch / 系统 Temp），真机 WinSxS 104,466 文件约 5 秒；`--elevate` 通过 UAC 只提升只读分析子进程，结果用 `--merge` 合并，报告段没有删除按钮。
+  - 分页/交换/休眠文件改为**逐盘探测**（`by_drive`）：此前只测 `C:`，把唯一压在 `F:` 上的 20.99 GB 分页文件报成 256 MB；
+  - 新增 `wsl_vhdx` 项（`%LOCALAPPDATA%\wsl`、`Docker\wsl`、`Packages\*LocalState`），并写明 vhdx 只增不减、压缩要导出/注销/重导、`--set-sparse` 对存量块无效；
+  - 全盘模式补 `recycle_bin`：逐盘列出回收站，此前 `--all-drives` 只输出 `drive_*` 分组，回收站整体漏出视野；
+  - 新增 `ide_caches` 分组（JetBrains 各产品的 `index`/`caches`/`jcef_cache`/`log`/`tmp`）；`dev_caches` 补 pnpm 全局 store 与 metadata 缓存；
+  - 服务端补父/子路径重叠拒绝、`SHFileOperationW`/Finder 取消识别（`fAnyOperationsAborted`、`-128`）、操作后校验目标仍存在，并逐路径返回 `completed`/`already_missing`/`partial`/`not_attempted`；
+  - 报告页重做：单层样式、总宽 940px、条目清单化（一块白卡 + 细分隔线）、默认折叠，概览只留三个数字与一条分段尺；文案改成日常说法（「能直接清 / 要你拿主意 / 别手动删」「移到回收站后空间不会立刻回来」），系统段显示逐盘明细与虚拟磁盘清单；
+  - 真机回归：`python -m unittest discover -s scripts` 70 项通过 + `node scripts/test_report_runtime.js assets/report_template.html` 通过（含合成夹具下的回收站逐盘、JetBrains 缓存、跨盘分页文件、vhdx 用例）。
 - **Windows agent 后台拉起 server.py**：bash 管道下 stdio 句柄继承会让启动命令挂死，用 `Invoke-CimMethod Win32_Process Create` 完全脱离，再读 `<analysis>.server-url.txt` 拿 URL。
 
 Windows 侧的问题在 [jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer) 提 issue —— 本仓库是这个 skill 的实际维护分支（见「来源与维护声明」）。
@@ -162,5 +188,7 @@ Windows 侧的问题在 [jidekaixin2dian/storage-analyzer](https://github.com/ji
 ## 长期优化建议素材（写进报告 summary.long_term）
 
 - 定期清理：`brew cleanup`、Xcode DerivedData、浏览器缓存
-- 可视化工具：DaisyDisk、GrandPerspective、OmniDiskSweeper
-- 大文件归档到外置盘 / iCloud / NAS；macOS「系统设置 > 通用 > 储存空间」的优化选项
+- Windows 定期项：`pnpm store prune`、`npm cache clean --force`、`uv cache prune`、浏览器缓存、`%TEMP%` 里各安装器的解包残留、IDE 索引（JetBrains `index`/`caches`）、Electron 应用的 `*-updater\installer.exe`
+- WSL 每半年对一次账：`wsl -d <发行版> -- df -h /` 与 vhdx 实际大小比对，差得多就按导出/注销/重导压缩
+- 可视化工具：DaisyDisk、GrandPerspective、OmniDiskSweeper；Windows 可用 WizTree / TreeSize
+- 大文件归档到外置盘 / iCloud / NAS；macOS「系统设置 > 通用 > 储存空间」的优化选项；Windows「设置 > 系统 > 存储」的存储感知

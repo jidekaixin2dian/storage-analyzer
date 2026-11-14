@@ -256,6 +256,59 @@ class CollectShapeTests(unittest.TestCase):
         measure.assert_not_called()
 
 
+class SystemFileTests(unittest.TestCase):
+    """The only page file often lives off C:, so it must be measured there too."""
+
+    def test_page_file_on_non_system_drive_is_found(self):
+        with tempfile.TemporaryDirectory() as drive:
+            with open(os.path.join(drive, "pagefile.sys"), "wb") as stream:
+                stream.write(b"\0" * 4096)
+            with patch.object(probe_system, "fixed_drives",
+                              return_value=[drive + os.sep]):
+                rows = probe_system.system_files_by_drive()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "pagefile.sys")
+        self.assertEqual(rows[0]["size_bytes"], 4096)
+        self.assertEqual(rows[0]["drive"], drive)
+
+    def test_absent_files_are_not_reported(self):
+        with tempfile.TemporaryDirectory() as drive:
+            with patch.object(probe_system, "fixed_drives",
+                              return_value=[drive + os.sep]):
+                self.assertEqual(probe_system.system_files_by_drive(), [])
+
+    def test_combine_rows_keeps_per_drive_detail(self):
+        rows = [{"path": "D:\\pagefile.sys", "drive": "D", "name": "pagefile.sys",
+                 "size_bytes": 2048, "size_h": "2.00 KB"}]
+        combined = probe_system.combine_rows(rows)
+        self.assertTrue(combined["present"])
+        self.assertEqual(combined["size_bytes"], 2048)
+        self.assertEqual(combined["files"], 1)
+        self.assertEqual(combined["by_drive"], rows)
+
+
+class WslDiskTests(unittest.TestCase):
+    def test_vhdx_under_wsl_dir_is_found(self):
+        with tempfile.TemporaryDirectory() as local:
+            target = os.path.join(local, "wsl", "Ubuntu-22.04", "ext4.vhdx")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as stream:
+                stream.write(b"\0" * 8192)
+            with patch.dict(os.environ, {"LOCALAPPDATA": local}):
+                disks = probe_system.wsl_virtual_disks()
+        self.assertEqual([d["path"] for d in disks], [target])
+        self.assertEqual(disks[0]["size_bytes"], 8192)
+
+    def test_unrelated_vhdx_is_ignored(self):
+        with tempfile.TemporaryDirectory() as local:
+            target = os.path.join(local, "wsl-backups", "copy.vhdx")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as stream:
+                stream.write(b"\0" * 1024)
+            with patch.dict(os.environ, {"LOCALAPPDATA": local}):
+                self.assertEqual(probe_system.wsl_virtual_disks(), [])
+
+
 class TemplateTests(unittest.TestCase):
     def test_template_renders_system_space_without_delete_actions(self):
         here = os.path.dirname(os.path.abspath(__file__))
@@ -272,6 +325,20 @@ class TemplateTests(unittest.TestCase):
         self.assertNotIn("doDelete", section)
         self.assertNotIn("del-btn trash", section)
         self.assertIn("copyBtn", section)
+
+    def test_template_shows_per_drive_and_vhdx_detail(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        template = os.path.join(here, "..", "assets", "report_template.html")
+        with open(template, encoding="utf-8") as stream:
+            html = stream.read()
+        start = html.index("function renderSystemSpace")
+        end = html.index("function renderTop5", start)
+        section = html[start:end]
+        # 逐盘分页文件与 vhdx 清单要在系统段渲染出来，否则只能去读 JSON
+        self.assertIn("it.by_drive", section)
+        self.assertIn("it.disks", section)
+        self.assertIn("各盘明细", section)
+        self.assertIn("虚拟磁盘", section)
 
 
 if __name__ == "__main__":

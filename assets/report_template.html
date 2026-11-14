@@ -218,7 +218,7 @@ function renderSystem(s, sm){
   let bar;
   if(g > 0 || y > 0 || r > 0){
     const seg=(v,cls,label)=> v>0?`<i class="${cls}" style="width:${(v/total*100).toFixed(2)}%" title="${label}：约 ${v.toFixed(1)} GB"></i>`:'';
-    bar = seg(g,'seg-green','可自动清')+seg(y,'seg-yellow','需手动')+seg(r,'seg-red','谨慎清理')+seg(other,'seg-blue','系统及其他');
+    bar = seg(g,'seg-green','能直接清')+seg(y,'seg-yellow','要你拿主意')+seg(r,'seg-red','别手动删')+seg(other,'seg-blue','系统与其他');
   } else {
     bar = `<i class="used" style="width:${(used/total*100).toFixed(2)}%"></i>`;
   }
@@ -227,9 +227,9 @@ function renderSystem(s, sm){
   let pills='';
   if(sm && sm.tier_stats){
     pills=`<div class="pills">
-      <span class="pill"><span class="dot green"></span>可自动清 <b>${fmtGB(g)}</b></span>
-      <span class="pill"><span class="dot yellow"></span>需手动 <b>${fmtGB(y)}</b></span>
-      <span class="pill"><span class="dot red"></span>谨慎清理 <b>${fmtGB(r)}</b></span>
+      <span class="pill"><span class="dot green"></span>能直接清 <b>${fmtGB(g)}</b></span>
+      <span class="pill"><span class="dot yellow"></span>要你拿主意 <b>${fmtGB(y)}</b></span>
+      <span class="pill"><span class="dot red"></span>别手动删 <b>${fmtGB(r)}</b></span>
       ${otherPill}
     </div>`;
   }
@@ -237,7 +237,7 @@ function renderSystem(s, sm){
   const allDisks = s.disks || [];
   const others = allDisks.filter(d => d.name !== s.disk_name);
   const barLabel = allDisks.length > 1
-    ? `<div class="bar-label">系统盘 ${esc(s.disk_name||'')}${(sm && sm.tier_stats)?' · 已用部分按清理分级着色':''}</div>` : '';
+    ? `<div class="bar-label">系统盘 ${esc(s.disk_name||'')}${(sm && sm.tier_stats)?' · 彩色部分是按能不能清分的':''}</div>` : '';
   const otherDisksBlock = others.length ? `<div class="other-disks">
       <div class="label">其他磁盘</div>
       ${others.map(d=>{
@@ -252,7 +252,7 @@ function renderSystem(s, sm){
       <div class="stat"><div class="k">总容量</div><div class="v">${esc(s.disk_total)}</div></div>
       <div class="stat"><div class="k">已用</div><div class="v">${esc(s.disk_used)}</div></div>
       <div class="stat"><div class="k">可用</div><div class="v">${esc(s.disk_free)}</div></div>
-      ${s.purgeable?`<div class="stat"><div class="k">可清除(系统)</div><div class="v">${esc(s.purgeable)}</div></div>`:''}
+      ${s.purgeable?`<div class="stat"><div class="k">系统可清理</div><div class="v">${esc(s.purgeable)}</div></div>`:''}
     </div>
     ${barLabel}
     <div class="bar">${bar}</div>
@@ -307,7 +307,7 @@ function renderSystemSpace(ss){
       <div class="note">结果写出后，用 <code>py -3 scripts/probe_system.py --merge &lt;analysis.json&gt; --with "%TEMP%/sys_probe_admin.json"</code> 合并进分析 JSON，再重新打开报告。</div>
     </div>`;
   }
-  const note = `<div class="sys-note">系统级空间：只读探测，<b>本页不提供删除按钮</b>。清理需要管理员权限，且多数操作不可逆；请按条目说明自行在管理员终端执行命令，执行前确认风险。</div>`;
+  const note = `<div class="sys-note">这些是 Windows 自己的文件。改动要管理员权限、多数撤不回来，所以这里<b>不放删除按钮</b>，只说明它是什么、官方命令是哪条。</div>`;
   const cards = ss.items.map(it=>{
     const meta = [];
     meta.push('风险：' + (it.risk_label || it.risk || '未知'));
@@ -318,6 +318,14 @@ function renderSystemSpace(ss){
     if(it.reclaim && it.reclaim.actual){
       body += `<div class="field"><div class="label">DISM 分析</div>实际 ${esc(it.reclaim.actual)} · 与 Windows 共享 ${esc(it.reclaim.shared||'未知')} · 可回收程序包 ${esc(it.reclaim.reclaimable_packages==null?'未知':it.reclaim.reclaimable_packages)}</div>`;
     }
+    if(it.by_drive && it.by_drive.length){
+      body += `<div class="field"><div class="label">各盘明细（大小会随使用浮动，不是能清出来的量）</div>
+        ${it.by_drive.map(d=>`<div class="row-path">${esc(d.size_h||'')}　${esc(d.path||'')}</div>`).join('')}</div>`;
+    }
+    if(it.disks && it.disks.length){
+      body += `<div class="field"><div class="label">虚拟磁盘（体积是上限，不等于里面真的用掉这么多）</div>
+        ${it.disks.map(d=>`<div class="row-path">${esc(d.size_h||'')}　${esc(d.path||'')}${d.modified?'（改动于 '+esc(d.modified)+'）':''}</div>`).join('')}</div>`;
+    }
     if(it.command){
       body += `<div class="cmd-label">官方处置命令（复制后自行执行，本页不代执行）</div>
         <div class="cmd">${esc(it.command)}${copyBtn(it.command)}</div>`;
@@ -325,12 +333,12 @@ function renderSystemSpace(ss){
     body += `<div class="note">${meta.map(esc).join(' · ')}</div>`;
     return card('blue', it.name, it.present ? it.size_h : '未检测到', it.path, esc(it.brief||''), body, '');
   }).join('');
-  return section('系统占用（只读探测，需管理员处置）', ss.items.length, note + elevated + cards);
+  return section('系统自己占的空间', ss.items.length, note + elevated + cards);
 }
 
 function renderTop5(rows){
   if(!rows) return '';
-  const tiers={green:'缓存建议',yellow:'需你判断',red:'谨慎处理'};
+  const tiers={green:'能直接清',yellow:'你决定',red:'别手删'};
   const body=rows.map(r=>`<tr>
     <td class="rank-number">${esc(r.rank)}</td>
     <td class="rank-identity">
@@ -340,7 +348,7 @@ function renderTop5(rows){
     </td>
     <td class="size">${esc(cleanSize(r.size))}</td>
   </tr>`).join('');
-  return `<section class="sec ranking"><div class="section-head"><h2>主要占用</h2><span class="count">${rows.length} 项</span></div>
+  return `<section class="sec ranking"><div class="section-head"><h2>占用最多的几项</h2><span class="count">${rows.length} 项</span></div>
     ${rows.length?`<div class="table-scroll"><table><thead><tr><th scope="col">排名</th><th scope="col">项目与依据</th><th scope="col" class="size">扫描大小</th></tr></thead><tbody>${body}</tbody></table></div>`:'<div class="empty-state">本次分析未提供占用排行，请先核对扫描范围。</div>'}
   </section>`;
 }
@@ -364,7 +372,7 @@ function renderGreen(items){
       </div></div>`:''}
     </div>`;
   }).join('');
-  return section('可处理的缓存',items.length,'<p class="sec-note">仅处理已核实的具体路径。目录体量不是保证可释放量；移入'+TW+'后仍占用空间。</p>'+rows,greenBatchActions(items));
+  return section('能直接清的',items.length,'<p class="sec-note">这些位置核对过：删了不影响软件用，只是以后要重新下载或重新生成。移进'+TW+'后空间还在，清空'+TW+'才算真释放。</p>'+rows,greenBatchActions(items));
 }
 
 // 绿灯批量操作仍需核对分析依据和全部精确路径。
@@ -484,24 +492,24 @@ const b64 = o => btoa(unescape(encodeURIComponent(JSON.stringify(o))));
 
 function renderYellow(items){
   if(!items||!items.length) return '';
-  const note = `<div class="sec-note">「在${FM}里打开」只查看、不删任何东西；「移到${TW}」仅针对核实过的安全子路径，可逆。是否该删的完整判断依据：点开条目查看。</div>`;
+  const note = `<div class="sec-note">这些都是你自己的东西，删不删你说了算。「在${FM}里打开看看」只打开、不删；点条目可以看完整理由。</div>`;
   const cards = items.map(it=>card('yellow', it.name, it.size, it.path,
     esc(it.content_profile),
     `${renderEvidence(it)}<div class="field"><div class="label">为什么需要人工判断</div>${esc(it.why_manual)}</div>
      <div class="field"><div class="label">处置路径</div>${esc(it.disposal)}</div>
      <div class="risk">风险：${esc(it.risk)}</div>`,
     yellowActions(it))).join('');
-  return section('需要你判断', items.length, note + cards);
+  return section('要你拿主意的', items.length, note + cards);
 }
 // 橙灯操作：打开文件夹（去自己审查删）+ 仅当有核实过的安全子路径时给「移到废纸篓」（只可逆，不直接删）
 function yellowActions(it){
   if(!DELETE) return '';
   const hasTrash = DELETE && it.trash_paths && it.trash_paths.length;
   const trashBtn = hasTrash
-    ? `<button class="del-btn trash" onclick="doDelete(this,'trash')">移到${TW}（所列路径）</button>` : '';
+    ? `<button class="del-btn trash" onclick="doDelete(this,'trash')">移到${TW}（只动上面这些路径）</button>` : '';
   return `<div class="field del-actions" data-paths="${hasTrash?b64(it.trash_paths):''}" data-open="${b64([it.path])}">
     <div class="del-row">
-      ${it.path?`<button class="del-btn open" onclick="doOpen(this)">在${FM}里打开</button>`:''}
+      ${it.path?`<button class="del-btn open" onclick="doOpen(this)">在${FM}里打开看看</button>`:''}
       ${trashBtn}
       <span class="del-status"></span>
     </div>
@@ -509,20 +517,20 @@ function yellowActions(it){
 }
 function renderRed(items){
   if(!items||!items.length) return '';
-  const note = `<div class="sec-note">应用本体在系统目录，请在打开的文件夹里用自带卸载器或系统「设置>应用」卸载；本页不代删。</div>`;
+  const note = `<div class="sec-note">这些是装好的软件或游戏。直接删文件夹会留下卸不干净的东西，请点「打开」后用它们自己的卸载程序，或走系统「设置 > 应用」。</div>`;
   const cards = items.map(it=>card('red', it.name, it.size||'', it.path,
     esc(it.why_keep),
     `${renderEvidence(it)}<div class="field"><div class="label">卸载 / 释放建议</div>${esc(it.indirect_release)}</div>
      ${it.auto_reclaim?`<div class="field"><div class="label">可释放</div>${esc(it.auto_reclaim)}</div>`:''}`,
     redActions(it))).join('');
-  return section('建议正规卸载', items.length, note + cards);
+  return section('别手动删，去卸载', items.length, note + cards);
 }
 // 红灯操作：只给「在文件管理器里打开并选中该 App」，让用户自己正规卸载（不后台代删，App 需谨慎）
 function redActions(it){
   if(!DELETE || !it.app_paths || !it.app_paths.length) return '';
   return `<div class="field del-actions" data-open="${b64(it.app_paths)}">
     <div class="del-row">
-      <button class="del-btn open" onclick="doOpen(this)">在${FM}里打开（去卸载）</button>
+      <button class="del-btn open" onclick="doOpen(this)">在${FM}里打开，去卸载</button>
       <span class="del-status"></span>
     </div>
   </div>`;
@@ -555,17 +563,17 @@ function renderPriority(sm){
   if(!sm||(!sm.priority&&!sm.overview)) return '';
   const intro=sm.overview?`<p class="lead">${esc(sm.overview)}</p>`:'';
   const body=sm.priority?(Array.isArray(sm.priority)?sumList(sm.priority):`<p>${esc(sm.priority)}</p>`):'';
-  return `<section class="sec priority"><div class="section-head"><h2>处理顺序</h2></div><div class="summary">${intro}${body}<a class="inline-link" href="#action-items">查看每项依据与操作</a></div></section>`;
+  return `<section class="sec priority"><div class="section-head"><h2>先做这几件</h2></div><div class="summary">${intro}${body}<a class="inline-link" href="#action-items">查看每项依据与操作</a></div></section>`;
 }
 
 // 长期优化建议：留在报告最后
 function renderLongTerm(sm){
   if(!sm || !sm.long_term || !sm.long_term.length) return '';
-  return `<div class="sec"><h2>长期优化建议</h2><div class="summary">${sumList(sm.long_term)}</div></div>`;
+  return `<div class="sec"><h2>以后怎么保持不占满</h2><div class="summary">${sumList(sm.long_term)}</div></div>`;
 }
 
 function renderEvidence(it){
-  return `<div class="field"><div class="label">判断依据</div>${esc(it.evidence || '未提供核实依据；体积或名称不能证明内容可安全删除，请先核对用途。')}</div>`;
+  return `<div class="field"><div class="label">我为什么这么判断</div>${esc(it.evidence || '未提供核实依据；体积或名称不能证明内容可安全删除，请先核对用途。')}</div>`;
 }
 
 function renderCoverage(){
@@ -578,7 +586,7 @@ function renderCoverage(){
   return `<div class="coverage ${failed?'warn':''}">
     <div class="coverage-heading"><b>${failed?'扫描有遗漏':'扫描覆盖说明'}</b><span>${esc(scope)}</span></div>
     <div class="coverage-metrics"><span><strong>${failed}</strong> 次读取失败</span><span><strong>${skipped}</strong> 个链接已跳过</span><span><strong>${filtered}</strong> 个子项未展开</span></div>
-    <p>${failed?'已知体量只是下限，请先查看遗漏依据。':'在所列范围内未记录读取失败；不代表覆盖整台电脑。'}</p>
+    <p>${failed?'所以下面的数字只是下限，点开可以看具体哪几个位置没读到。':'范围内没遇到读不进去的目录，但这些数字仍只是这次扫描的结果。'}</p>
     <details><summary>查看扫描目标与遗漏依据</summary><div class="coverage-body">
       <p>大小口径：${esc(c.size_basis||'未注明')}。按名称出现的硬链接未去重，压缩、稀疏文件与物理占用可能不同。不同热点分组可能父子重叠，不能相加。列表有阈值和条数限制。</p>
       ${targets.map(([k,v])=>`<div class="row-path">${esc(v.path)}<br>阈值 ${esc(v.min_kb)} KB · 最多 ${esc(v.limit)} 项 · 低于阈值 ${esc(v.below_threshold)} 项 / 超出上限 ${esc(v.omitted_by_limit)} 项</div>`).join('')}
