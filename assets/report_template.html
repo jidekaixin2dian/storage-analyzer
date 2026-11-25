@@ -168,7 +168,7 @@ function markServerDown(){
     b = document.createElement('div');
     b.id = 'srv-banner';
     b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#c73e47;color:#fff;padding:10px 16px;font:14px/1.6 system-ui,sans-serif;';
-    b.innerHTML = '<b>报告服务已断开</b>：本标签页对应的服务已关闭或已被替换，所有按钮都会失败。请关闭本标签页，重新运行 server.py（同一份分析会自动复用存活实例）打开新页面。';
+    b.innerHTML = '<b>报告服务已断开</b>：服务已关闭或分析数据已更新。请重新运行 server.py 打开新页面。';
     document.body.appendChild(b);
   }
   b.style.display = 'block';
@@ -198,11 +198,15 @@ const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&l
 const cleanSize = s => String(s==null?'':s).replace(/[（(]\s*估算[^）)]*[）)]/g, '').trim();
 
 function copyBtn(text){
-  const id='c'+Math.random().toString(36).slice(2);
-  // store raw text on element via data attribute (base64 to survive quotes)
-  return `<button class="copy" data-cmd="${btoa(unescape(encodeURIComponent(text)))}">复制</button>`;
+  return `<button class="copy" data-cmd="${b64(text)}">复制</button>`;
 }
 
+const diskKey = name => String(name||'').replace(/[\\/]+$/,'').toUpperCase();
+
+function mainCapacityKnown(system){
+  const disk = (system.disks||[]).find(d=>diskKey(d.name)===diskKey(system.disk_name));
+  return parseGB(system.disk_total)>0 && (!disk || (!disk.capacity_error && parseGB(disk.total)>0));
+}
 
 function renderSystem(s, sm){
   document.getElementById('meta').textContent =
@@ -235,20 +239,25 @@ function renderSystem(s, sm){
   }
   // 多盘符（Windows）：主盘用上面的分段条，其余盘紧凑列出
   const allDisks = s.disks || [];
-  const others = allDisks.filter(d => d.name !== s.disk_name);
+  const mainDisk = allDisks.find(d=>diskKey(d.name)===diskKey(s.disk_name));
+  const mainKnown = mainCapacityKnown(s);
+  const others = allDisks.filter(d=>diskKey(d.name)!==diskKey(s.disk_name));
   const barLabel = allDisks.length > 1
     ? `<div class="bar-label">系统盘 ${esc(s.disk_name||'')}${(sm && sm.tier_stats)?' · 已用部分按清理分级着色':''}</div>` : '';
   const otherDisksBlock = others.length ? `<div class="other-disks">
       <div class="label">其他磁盘</div>
       ${others.map(d=>{
-        const u=parseGB(d.used), t=parseGB(d.total)||1;
+        const known=!d.capacity_error && parseGB(d.total)>0;
+        if(!known) return `<div class="odisk"><span class="odisk-name">${esc(d.name)}</span>
+          <span class="odisk-num">容量未知${d.capacity_error?'：'+esc(d.capacity_error):''}</span></div>`;
+        const u=parseGB(d.used), t=parseGB(d.total);
         const pct=Math.min(100, u/t*100).toFixed(1);
         return `<div class="odisk"><span class="odisk-name">${esc(d.name)}</span>
           <div class="obar"><i style="width:${pct}%"></i></div>
           <span class="odisk-num">${esc(d.used)} / ${esc(d.total)}</span></div>`;
       }).join('')}</div>` : '';
   return `<div class="overview">
-    ${parseGB(s.disk_total)>0?`<div class="stats">
+    ${mainKnown?`<div class="stats">
       <div class="stat"><div class="k">总容量</div><div class="v">${esc(s.disk_total)}</div></div>
       <div class="stat"><div class="k">已用</div><div class="v">${esc(s.disk_used)}</div></div>
       <div class="stat"><div class="k">可用</div><div class="v">${esc(s.disk_free)}</div></div>
@@ -257,7 +266,8 @@ function renderSystem(s, sm){
     ${barLabel}
     <div class="bar">${bar}</div>
     <div class="ruler"><span>0</span><span>${esc(s.disk_total)}</span></div>
-    ${pills}`:'<p class="capacity-unknown">未提供磁盘容量数据。本报告仅展示已扫描范围。</p>'}
+    ${pills}`:'<p class="capacity-unknown">磁盘容量未知或读取失败，本报告仅展示已扫描范围。'
+      +(mainDisk && mainDisk.capacity_error?' '+esc(mainDisk.capacity_error):'')+'</p>'}
     ${otherDisksBlock}
     <details class="system-details"><summary>系统与扫描位置</summary><div class="sysgrid">
       <div><span>系统　</span>${esc(s.os)} (${esc(s.build)})</div>
@@ -271,11 +281,11 @@ function renderSystem(s, sm){
 // 从 "约 27.8 GB（…）" / "300.3 GB" 这类字符串里取数值，统一换算成 GB
 function parseGB(str){
   if(!str) return 0;
-  const m=String(str).match(/([\d.]+)\s*(TB|GB|MB)?/i);
+  const m=String(str).match(/(\d+(?:\.\d+)?)\s*(PB|TB|GB|MB|KB|B)?/i);
   if(!m) return 0;
-  let v=parseFloat(m[1]); const u=(m[2]||'GB').toUpperCase();
-  if(u==='TB') v*=1024; else if(u==='MB') v/=1024;
-  return v;
+  const unit=(m[2]||'GB').toUpperCase();
+  const value=Number(m[1])*1024**(['B','KB','MB','GB','TB','PB'].indexOf(unit)-3);
+  return Number.isFinite(value)?value:0;
 }
 
 // —— 系统占用：只读探测结果，单独成段，不并入三灯、不提供删除按钮 ——
@@ -323,7 +333,8 @@ function renderSystemSpace(ss){
         <div class="cmd">${esc(it.command)}${copyBtn(it.command)}</div>`;
     }
     body += `<div class="note">${meta.map(esc).join(' · ')}</div>`;
-    return card('blue', it.name, it.present ? it.size_h : '未检测到', it.path, esc(it.brief||''), body, '');
+    const size=it.partial ? (it.present ? '已读 '+it.size_h+'（探测不完整）' : '探测不完整') : (it.present ? it.size_h : '未检测到');
+    return card('blue', it.name, size, it.path, esc(it.brief||''), body, '');
   }).join('');
   return section('系统占用（只读探测，需管理员处置）', ss.items.length, note + elevated + cards);
 }
@@ -379,10 +390,32 @@ function greenBatchActions(items){
   </span>`;
 }
 
+function decodeB64(value){
+  const binary = atob(value);
+  if(btoa(binary)!==value) throw new TypeError('无效的 Base64');
+  const bytes = Uint8Array.from(binary, c=>c.charCodeAt(0));
+  return JSON.parse(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes));
+}
+
+function decodePaths(value){
+  const paths = decodeB64(value);
+  if(!Array.isArray(paths) || paths.some(path=>typeof path!=='string' || !path || path.includes('\0'))){
+    throw new TypeError('无效的路径列表');
+  }
+  return paths;
+}
+
+function invalidActionPaths(wrap){
+  const status = wrap.querySelector('.del-status');
+  status.textContent = '无法读取目标路径，操作未发送。请重新打开报告。';
+  status.className = 'del-status err';
+}
+
 // Preserve the per-path result so partially completed cards can safely resume.
 function actionResult(wrap, res, mode){
   const status = wrap.querySelector('.del-status');
-  const paths = JSON.parse(decodeURIComponent(escape(atob(wrap.dataset.paths || b64([])))));
+  const paths = decodePaths(wrap.dataset.paths);
+  if(!paths.length) return;
   const results = res.results || (res.done||[]).map(path=>({path,status:'completed'}));
   const done = new Set(results.filter(r=>['completed','already_missing'].includes(r.status)).map(r=>r.path));
   const remaining = paths.filter(p=>!done.has(p));
@@ -412,15 +445,16 @@ async function doBatch(btn, mode){
   const status = secActions.querySelector('.del-status');
   const wraps = [...sec.querySelectorAll('.item.green .del-actions')]
     .filter(w => !w.closest('.item').classList.contains('cleaned'));
-  const allPaths=wraps.flatMap(w=>JSON.parse(decodeURIComponent(escape(atob(w.dataset.paths)))));
+  let allPaths;
+  try { allPaths = wraps.flatMap(w=>decodePaths(w.dataset.paths)); }
+  catch { invalidActionPaths(secActions); return; }
   if(!allPaths.length){ status.textContent='没有待处理路径'; return; }
   if(!await requestConfirmation(allPaths, mode)){ status.textContent='已取消，未发送操作。'; status.className='del-status sec-status'; return; }
-  postAction(secActions, allPaths, mode).then(res=>{
-    wraps.forEach(w=>actionResult(w, res, mode));
-    status.textContent = res.ok ? '本批路径已处理；报告体量仍是扫描时快照。' : '本批未全部完成，请查看各项结果。'+(res.error||'');
-    status.className='del-status sec-status '+(res.ok?'ok':'err');
-    if(res.ok) secActions.querySelectorAll('.del-btn').forEach(b=>b.remove());
-  });
+  const res = await postAction(secActions, allPaths, mode);
+  if(res.results || (res.done||[]).length) wraps.forEach(w=>actionResult(w, res, mode));
+  status.textContent = res.ok ? '本批路径已处理；报告体量仍是扫描时快照。' : '本批未全部完成。'+(res.error||'请查看各项结果。');
+  status.className='del-status sec-status '+(res.ok?'ok':'err');
+  if(res.ok) secActions.querySelectorAll('.del-btn').forEach(b=>b.remove());
 }
 
 function actionConfirmation(paths, mode){
@@ -452,32 +486,45 @@ function requestConfirmation(paths, mode){
   });
 }
 
-function postAction(wrap, paths, mode){
+async function postAction(wrap, paths, mode){
   const status = wrap.querySelector('.del-status');
-  const btns = document.querySelectorAll('.del-btn');
+  const btns = [...wrap.querySelectorAll('.del-btn')].filter(b=>!b.disabled);
   status.textContent = '处理中…'; status.className='del-status';
   btns.forEach(b=>b.disabled=true);
-  return fetch(DELETE.endpoint, {method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({token:DELETE.token, paths, mode})})
-    .then(r=>r.json()).then(res=>{ btns.forEach(b=>b.disabled=false); return res; })
-    .catch(e=>{ btns.forEach(b=>b.disabled=false); markServerDown(); return {ok:false, error:'连接失败，操作结果未知（'+e+'）。请先检查原路径，不要直接重试；报告服务可能已关闭。'}; });
+  try {
+    const response = await fetch(DELETE.endpoint, {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:DELETE.token, paths, mode})});
+    const res = await response.json();
+    if(!res || typeof res.ok!=='boolean') throw new TypeError('操作响应格式无效');
+    return res;
+  } catch(e) {
+    markServerDown();
+    return {ok:false, error:'连接失败，操作结果未知（'+e+'）。请先检查原路径，不要直接重试；报告服务可能已关闭。'};
+  } finally {
+    btns.forEach(b=>b.disabled=false);
+  }
 }
 
 async function doDelete(btn, mode){
   const wrap = btn.closest('.del-actions');
-  const paths = JSON.parse(decodeURIComponent(escape(atob(wrap.dataset.paths))));
+  let paths;
+  try { paths = decodePaths(wrap.dataset.paths); }
+  catch { invalidActionPaths(wrap); return; }
+  if(!paths.length) return;
   if(!await requestConfirmation(paths, mode)){ const status=wrap.querySelector('.del-status'); status.textContent='已取消，未发送操作。'; status.className='del-status'; return; }
-  postAction(wrap, paths, mode).then(res=>actionResult(wrap, res, mode));
+  actionResult(wrap, await postAction(wrap, paths, mode), mode);
 }
 
-function doOpen(btn){
+async function doOpen(btn){
   const wrap = btn.closest('.del-actions');
-  const paths = JSON.parse(decodeURIComponent(escape(atob(wrap.dataset.open))));
-  postAction(wrap, paths, 'open').then(res=>{
-    const status = wrap.querySelector('.del-status');
-    if(res.ok){ status.textContent='已提交到'+FM+'的打开请求；请检查窗口，本操作未清理文件'; status.className='del-status ok'; }
-    else { status.textContent='未全部打开：'+(res.error||'失败')+'；已提交 '+(res.done||[]).length+' 个路径'; status.className='del-status err'; }
-  });
+  let paths;
+  try { paths = decodePaths(wrap.dataset.open); }
+  catch { invalidActionPaths(wrap); return; }
+  if(!paths.length) { invalidActionPaths(wrap); return; }
+  const res = await postAction(wrap, paths, 'open');
+  const status = wrap.querySelector('.del-status');
+  if(res.ok){ status.textContent='已提交到'+FM+'的打开请求；请检查窗口，本操作未清理文件'; status.className='del-status ok'; }
+  else { status.textContent='未全部打开：'+(res.error||'失败')+'；已提交 '+(res.done||[]).length+' 个路径'; status.className='del-status err'; }
 }
 
 const b64 = o => btoa(unescape(encodeURIComponent(JSON.stringify(o))));
@@ -568,8 +615,18 @@ function renderEvidence(it){
   return `<div class="field"><div class="label">判断依据</div>${esc(it.evidence || '未提供核实依据；体积或名称不能证明内容可安全删除，请先核对用途。')}</div>`;
 }
 
-function renderCoverage(){
-  const c=DATA.coverage;
+function formatBytes(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '未知';
+  if(n<1024) return n+' B';
+  const units=['KB','MB','GB','TB','PB'];
+  let amount=n/1024, index=0;
+  while(amount>=1024 && index<units.length-1){ amount/=1024; index++; }
+  return amount.toFixed(amount>=10?1:2)+' '+units[index];
+}
+
+function renderCoverage(coverage=DATA.coverage, system=DATA.system){
+  const c=coverage;
   if(!c) return `<div class="denied"><b>扫描范围与完整性未提供</b>：这份分析未附带 coverage，不能据此确认已完整扫描。旧版 macOS 扫描由 du 报告分配空间，Windows 为逻辑文件长度；两者均不等于可释放空间。</div>`;
   const scope={all_local_fixed_volumes:'本地固定盘',windows_hotspots:'Windows 热点目录',synthetic_fixture:'隔离合成目录（演示）'}[DATA.scan_scope] || DATA.scan_scope || '未注明';
   const failed=c.denied_count||0, skipped=c.skipped_reparse_count||0;
@@ -577,12 +634,21 @@ function renderCoverage(){
   const filtered=targets.reduce((n,[k,v])=>n+(v.below_threshold||0)+(v.omitted_by_limit||0),0);
   return `<div class="coverage ${failed?'warn':''}">
     <div class="coverage-heading"><b>${failed?'扫描有遗漏':'扫描覆盖说明'}</b><span>${esc(scope)}</span></div>
-    <div class="coverage-metrics"><span><strong>${failed}</strong> 次读取失败</span><span><strong>${skipped}</strong> 个链接已跳过</span><span><strong>${filtered}</strong> 个子项未展开</span></div>
+    <div class="coverage-metrics"><span><strong>${failed}</strong> 处读取失败</span><span><strong>${skipped}</strong> 个链接已跳过</span><span><strong>${filtered}</strong> 个子项未展开</span></div>
     <p>${failed?'已知体量只是下限，请先查看遗漏依据。':'在所列范围内未记录读取失败；不代表覆盖整台电脑。'}</p>
     <details><summary>查看扫描目标与遗漏依据</summary><div class="coverage-body">
       <p>大小口径：${esc(c.size_basis||'未注明')}。按名称出现的硬链接未去重，压缩、稀疏文件与物理占用可能不同。不同热点分组可能父子重叠，不能相加。列表有阈值和条数限制。</p>
       ${targets.map(([k,v])=>`<div class="row-path">${esc(v.path)}<br>阈值 ${esc(v.min_kb)} KB · 最多 ${esc(v.limit)} 项 · 低于阈值 ${esc(v.below_threshold)} 项 / 超出上限 ${esc(v.omitted_by_limit)} 项</div>`).join('')}
-      ${(c.volumes||[]).map(v=>`<div class="row-path">${esc(v.root)}<br>已读 ${esc(v.files)} 文件 / ${esc(v.directories)} 目录</div>`).join('')}
+      ${(c.volumes||[]).map(v=>{
+        const scanned=v.bytes==null?'未知':formatBytes(v.bytes);
+        const disk=((system && system.disks)||[]).find(d=>diskKey(d.name)===diskKey(v.root));
+        const capacityBytes=disk && !disk.capacity_error ? (disk.total_bytes ?? parseGB(disk.total)*1024**3) : 0;
+        const capacity=capacityBytes>0 ? disk.total : '未知';
+        const mismatch=capacityBytes>0 && Number(v.bytes)>capacityBytes;
+        return `<div class="row-path">${esc(v.root)}<br>已读 ${esc(scanned)} 逻辑字节 · 容量快照 ${esc(capacity)} · 已读 ${esc(v.files)} 文件 / ${esc(v.directories)} 目录`
+          +(mismatch?'<br><b>已读逻辑字节超过容量快照：请检查硬链接、扫描重复、容量数据或文件变化；逻辑大小不等于物理占用。</b>':'')
+          +(disk && disk.capacity_error?'<br>容量读取失败：'+esc(disk.capacity_error):'')+'</div>';
+      }).join('')}
       ${(c.denied||[]).map(v=>`<div class="row-path">${esc(v.path)}<br>${esc({permission_denied:'权限不足',not_found:'路径不存在或扫描期间消失',io_error:'读取失败'}[v.reason]||v.reason||'读取失败')} · ${esc(v.error)}</div>`).join('')}
       ${c.denied_sample_truncated?'<p>失败路径仅列出前 500 条，以上不是完整清单。</p>':''}
       ${(c.skipped_reparse||[]).map(p=>`<div class="row-path">跳过链接：${esc(p)}</div>`).join('')}
@@ -598,7 +664,7 @@ function renderDenied(){
 
 // mount
 const app=document.getElementById('app');
-app.innerHTML = '<div class="scan-context '+(parseGB(DATA.system.disk_total)>0?'':'without-capacity')+'">'
+app.innerHTML = '<div class="scan-context '+(mainCapacityKnown(DATA.system)?'':'without-capacity')+'">'
   + renderSystem(DATA.system, DATA.summary) + '</div>'
   + '<div class="diagnosis-grid">' + renderTop5(DATA.top5)
   + '<div class="decision-aside">' + renderCoverage() + renderPriority(DATA.summary) + '</div></div>'
@@ -606,14 +672,18 @@ app.innerHTML = '<div class="scan-context '+(parseGB(DATA.system.disk_total)>0?'
   + renderSystemSpace(DATA.system_space) + renderDenied() + renderLongTerm(DATA.summary);
 
 // copy handlers (delegated)
-document.addEventListener('click', e=>{
+document.addEventListener('click', async e=>{
   const b=e.target.closest('.copy'); if(!b) return;
   e.stopPropagation();
-  const text=decodeURIComponent(escape(atob(b.dataset.cmd)));
-  navigator.clipboard.writeText(text).then(()=>{
+  try {
+    const text=decodeB64(b.dataset.cmd);
+    if(typeof text!=='string') throw new TypeError('无效的命令文本');
+    await navigator.clipboard.writeText(text);
     b.textContent='已复制'; b.classList.add('done');
-    setTimeout(()=>{b.textContent='复制';b.classList.remove('done');},1500);
-  });
+  } catch {
+    b.textContent='复制失败';
+  }
+  setTimeout(()=>{b.textContent='复制';b.classList.remove('done');},1500);
 });
 </script>
 </body>

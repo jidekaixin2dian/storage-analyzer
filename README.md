@@ -30,6 +30,16 @@
 
 复现方法见 [受控案例](docs/controlled-case.md)；历史改动与验证范围见 [v1.4.0 Release](https://github.com/jidekaixin2dian/storage-analyzer/releases/tag/v1.4.0)。回收站结果使用隔离案例模拟，不代表各平台真实桌面验收；移入回收站不等于空间已释放。
 
+## v1.6.0 更新
+
+- 报告路径编码改为严格 UTF-8 往返，中文、Windows 反斜杠和 UNC 路径不再在提交操作前被破坏；无效数据直接拒绝，不发送错误目标。
+- 批量、单卡和打开操作只禁用当前操作区的按钮，并在成功、失败或断线后恢复，不再锁死其他卡片。
+- 读取失败与跳过链接按规范化路径计数，样本上限只限制显示明细。同一扫描根保留最完整的读数。JetBrains 根目录拒绝访问、磁盘容量读取失败和 WSL VHDX 探测异常都有对应诊断。
+- 全盘报告展示逐卷已读逻辑字节、容量快照和异常对照；读取容量失败的盘仍保留条目并说明原因。
+- 单实例复用同时比较分析文件的 mtime 与 SHA-256。分析内容变化后，v1.6.0 服务会要求重新打开报告。同一服务进程会拒绝同时处理重叠的删除目标。
+
+这些改动继续沿用现有删除白名单与确认流程，未扩大可删除范围；验证使用临时合成样本，不替代真实桌面回收站验收。
+
 ## 安装
 
 把本仓库克隆到你的 agent skills 目录（以 Claude Code / pi 等支持 Agent Skills 的环境为例）：
@@ -44,6 +54,8 @@ git clone https://github.com/jidekaixin2dian/storage-analyzer.git $env:USERPROFI
 ```
 
 依赖：Python 3.8+（仅标准库，零第三方依赖）。macOS 开箱即用；Windows 需已安装 Python 并在 PATH 中。
+
+DSH 可把同一个 Git 仓库克隆到 `<DSH_HOME>/skills/storage-analyzer`，由技能目录加载 `SKILL.md`。更新前用 Ctrl+C 停止正在运行的报告服务。Git 安装可以在技能目录运行 `git status --short` 检查本地修改，再运行 `git pull --ff-only --tags` 更新，最后用 `git describe --tags --exact-match HEAD` 核对发布版本。GitHub Release 压缩包解压后的目录需要下载并替换为新版，或重新用 Git 安装。
 
 ## 使用
 
@@ -64,7 +76,7 @@ python scripts/server.py storage_analysis.json
 
 报告页面顶部有服务健康状态（每 8 秒心跳），服务断开时页面会明确提示，而不是笼统的「Failed to fetch」。
 
-整机模式每盘只遍历一次，热点统计复用该次遍历；`coverage` 列出访问失败与跳过的 reparse/junction 数量，不把权限不足当成空目录。报告大小为逻辑文件长度，硬链接和压缩可能与物理占用不同。扫描本身不删除文件；只有用户明确要求清理时才处理核实过的目标。`.cache`、Temp 和已安装依赖不按名称整体清空。
+整机模式的热点统计复用各固定盘遍历结果，逐盘回收站另外汇总。`coverage` 列出读取失败与跳过的 reparse/junction 数量。报告大小为逻辑文件长度，硬链接和压缩可能与物理占用不同。扫描只读，清理须经用户授权并核实具体目标。`.cache`、Temp 和已安装依赖按实际用途判断。
 
 扫描支持 Windows 尾部空格/点与长路径，报告保留可读的原始名称；异常路径不据此自动删除。整机报告允许打开其他本地固定盘的精确白名单路径，但 rm/trash 仍限定 HOME 内，不能借「打开」扩大删除权限。
 
@@ -80,7 +92,7 @@ GitHub Actions 在 Windows、macOS 和 Linux 上运行这些合成数据回归�
 
 普通 Windows 热点扫描同样输出 `coverage`，区分权限失败、文件消失和其他 I/O 错误；报告说明逻辑大小、链接跳过、列表阈值与遗漏。分析阶段须保留扫描的 `scan_scope` / `coverage`，为建议补充 `evidence`（依据）及适用的 `next_step`（下一步）；旧数据仍可打开，缺失依据会标明未知。
 
-不支持的平台会输出错误 JSON 并以退出码 2 结束，便于自动化识别失败。磁盘容量读取失败时向 stderr 记录包含路径和原因的 warning，保留未知容量或跳过该盘的容量条目，继续普通扫描；stdout 的报告 JSON 不混入这些诊断。
+不支持的平台会输出错误 JSON 并以退出码 2 结束，便于自动化识别失败。磁盘容量读取失败时保留该盘和失败原因，容量标为未知，诊断同时写入 stderr。stdout 继续输出扫描 JSON。
 
 操作结果在原有 `ok` / `done` / `failed` 之外附带 `status` / `results`，逐路径区分完成、原已不存在、取消、失败、未执行和打开请求已提交。部分完成保留未处理入口；目录操作可能已影响部分子项，失败后应先检查目标。移到回收站不等于释放空间，直接删除也不承诺测得净释放量。报告体量保持扫描时快照。
 

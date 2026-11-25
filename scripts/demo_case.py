@@ -73,7 +73,7 @@ def build_case(destination):
 
 
 def serve_case(dest):
-    server.DATA, server.TPL, server.RM_ALLOW, server.TRASH_ALLOW, server.OPEN_ALLOW = server.load(str(dest/'analysis.json'))
+    server.load(dest/'analysis.json')
     root = (dest/'synthetic-files').resolve()
     home = Path(server.HOME).resolve()
     if home not in root.parents:

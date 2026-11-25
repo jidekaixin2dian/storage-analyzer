@@ -70,6 +70,25 @@ class IdeCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as local:
             self.assertEqual(scan.ide_caches_windows(local), [])
 
+    def test_denied_jetbrains_root_is_partial_not_empty(self):
+        with tempfile.TemporaryDirectory() as local:
+            base = os.path.join(local, 'JetBrains')
+            os.makedirs(base)
+            coverage = {}
+            actual = os.scandir
+            def denied(path):
+                if os.path.normcase(os.fspath(path)) == os.path.normcase(scan.api_path(base)):
+                    raise PermissionError('synthetic IDE denial')
+                return actual(path)
+            with patch.object(scan, 'optional_path_present', return_value=True), \
+                    patch.object(scan.os, 'scandir', side_effect=denied):
+                rows = scan.ide_caches_windows(local, coverage)
+            self.assertTrue(rows[0]['partial'])
+            self.assertEqual(rows[0]['path'], base)
+            self.assertEqual(coverage['denied_count'], 1)
+            self.assertEqual(coverage['status'], 'partial')
+            self.assertEqual(coverage['denied'][0]['reason'], 'permission_denied')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -26,7 +26,8 @@ import shutil
 import subprocess
 import sys
 import time
-from scan_windows_full import api_path
+from scan_windows_full import (COVERAGE_SAMPLE_LIMITS, Coverage, api_path,
+                               coverage_path_key, display_path, fixed_drives)
 
 HOME = os.path.expanduser("~")
 
@@ -156,19 +157,57 @@ def scan_macos():
 # ======================================================================
 # Windows  (真机实测：Windows 11 + Python 3.12，纯标准库 os / shutil / ctypes)
 # ======================================================================
-def merge_coverage(target, source):
-    """Keep per-target diagnostics; hotspot views overlap and must not be summed."""
+def merge_coverage(target, source, include_volumes=True):
+    """Keep per-target diagnostics; hotspot views overlap and must not be summed.
+
+    Failure counts describe distinct failed paths, not duplicated view sizes.
+    Merge by normalized path so repeated overlapping walks do not inflate the
+    count, while failures in independent roots remain visible.
+    """
     if target is None:
         return
     target.setdefault('size_basis', source['size_basis'])
-    for key in ('denied_count', 'skipped_reparse_count'):
-        target[key] = target.get(key, 0) + source[key]
-    for key, cap in (('denied', 500), ('skipped_reparse', 100)):
-        target.setdefault(key, []).extend(source.get(key, [])[:max(0, cap - len(target.get(key, [])))])
+    for key, cap in COVERAGE_SAMPLE_LIMITS.items():
+        entries = []
+        seen = set()
+        for value in target.get(key, []) + source.get(key, []):
+            normalized = coverage_path_key(value)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if len(entries) < cap:
+                entries.append(value)
+        if isinstance(source, Coverage):
+            seen.update(source.paths[key])
+        if isinstance(target, Coverage):
+            target.paths[key].update(seen)
+            seen = target.paths[key]
+        target[key] = entries
+        count_key = key + '_count'
+        target[count_key] = max(target.get(count_key, 0), source.get(count_key, 0), len(seen))
     target.setdefault('groups', {}).update(source.get('groups', {}))
-    target.setdefault('volumes', []).extend(source.get('volumes', []))
-    target['denied_sample_truncated'] = target['denied_count'] > len(target['denied'])
+    if include_volumes:
+        volumes = {}
+        for row in target.get('volumes', []) + source.get('volumes', []):
+            key = coverage_path_key(row['root'])
+            existing = volumes.get(key)
+            if existing is None or (row['bytes'], row['files'], row['directories']) > (
+                    existing['bytes'], existing['files'], existing['directories']):
+                volumes[key] = dict(row, root=display_path(row['root']))
+        target['volumes'] = list(volumes.values())
+    target['denied_sample_truncated'] = target['denied_count'] > len(target.get('denied', []))
     target['status'] = 'partial' if target['denied_count'] else 'complete_with_exclusions'
+
+
+def record_scan_failure(coverage, path, exc):
+    """Preserve failures that happen before a guarded directory walk starts."""
+    if coverage is None:
+        return
+    reason = ('permission_denied' if isinstance(exc, PermissionError) else
+              'not_found' if isinstance(exc, FileNotFoundError) else 'io_error')
+    detail = Coverage()
+    detail.record('denied', {'path': display_path(path), 'error': str(exc), 'reason': reason})
+    merge_coverage(coverage, detail)
 
 
 def dir_size_bytes(path, coverage=None):
@@ -204,19 +243,25 @@ def scandir_children(path, min_kb=51200, limit=40, coverage=None):
     return rows
 
 
+def drive_capacity(root):
+    try:
+        total, used, free = shutil.disk_usage(root)
+    except Exception as exc:
+        logging.warning("disk_usage failed for %s (%s): %s", root, type(exc).__name__, exc)
+        return {"name": root, "total": "?", "used": "?", "free": "?",
+                "capacity_error": "%s: %s" % (type(exc).__name__, exc)}
+    return {"name": root, "total": human(total // 1024), "used": human(used // 1024),
+            "free": human(free // 1024), "total_bytes": total}
+
+
 def list_drives_windows():
     drives = []
     import string
+    fixed = set(fixed_drives())
     for letter in string.ascii_uppercase:
         root = f"{letter}:\\"
-        if os.path.exists(root):
-            try:
-                t, u, f = shutil.disk_usage(root)
-                drives.append({"name": root, "total": human(t // 1024),
-                               "used": human(u // 1024), "free": human(f // 1024)})
-            except Exception as exc:
-                logging.warning("disk_usage failed for %s (%s): %s", root, type(exc).__name__, exc)
-                continue
+        if root in fixed or os.path.exists(root):
+            drives.append(drive_capacity(root))
     return drives
 
 
@@ -229,7 +274,7 @@ def recycle_bin_windows(sysdrive, min_kb=51200, coverage=None, label="回收站"
     base = os.path.join(sysdrive, "$Recycle.Bin")
     if not optional_path_present(base):
         return []
-    detail = {}
+    detail = Coverage()
     kb = dir_size_bytes(base, detail) // 1024
     merge_coverage(coverage, detail)
     if kb < min_kb and not detail.get('denied_count'):
@@ -265,15 +310,17 @@ def ide_caches_windows(local, coverage=None):
     try:
         products = [entry.path for entry in os.scandir(api_path(base))
                     if entry.is_dir(follow_symlinks=False)]
-    except OSError:
-        return []
+    except OSError as exc:
+        record_scan_failure(coverage, base, exc)
+        return [{'name': '(unreadable)', 'path': base, 'size_kb': 0,
+                 'size_h': '?', 'denied': True, 'partial': True}]
     rows = []
     for product in products:
         for sub in IDE_CACHE_SUBDIRS:
             path = os.path.join(product, sub)
             if not optional_path_present(path):
                 continue
-            detail = {}
+            detail = Coverage()
             kb = dir_size_bytes(path, detail) // 1024
             merge_coverage(coverage, detail)
             if kb < 10240 and not detail.get('denied_count'):
@@ -293,18 +340,18 @@ def system_info_windows():
     info["arch"] = os.environ.get("PROCESSOR_ARCHITECTURE", platform.machine())
     info["user"] = os.environ.get("USERNAME", "")
     info["home"] = os.environ.get("USERPROFILE", HOME)
-    sysdrive = os.environ.get("SystemDrive", "C:") + "\\"
-    total, used, free = "?", "?", "?"
-    try:
-        t, u, f = shutil.disk_usage(sysdrive)
-        total, used, free = human(t // 1024), human(u // 1024), human(f // 1024)
-    except Exception as exc:
-        logging.warning("disk_usage failed for %s (%s): %s", sysdrive, type(exc).__name__, exc)
-    info["disk_total"], info["disk_used"], info["disk_free"] = total, used, free
+    sysdrive = os.environ.get("SystemDrive", "C:").upper() + "\\"
+    disks = list_drives_windows()
+    main_disk = next((disk for disk in disks if disk["name"] == sysdrive), None)
+    if main_disk is None:
+        main_disk = drive_capacity(sysdrive)
+        disks.insert(0, main_disk)
+    info["disk_total"], info["disk_used"], info["disk_free"] = (
+        main_disk["total"], main_disk["used"], main_disk["free"])
     info["filesystem"] = "NTFS"
     info["purgeable"] = ""
     info["disk_name"] = sysdrive
-    info["disks"] = list_drives_windows()
+    info["disks"] = disks
     return info
 
 
@@ -339,7 +386,7 @@ def scan_windows(coverage=None):
     for path in dev_paths:
         if not optional_path_present(path):
             continue
-        detail = {}
+        detail = Coverage()
         kb = dir_size_bytes(path, detail) // 1024
         merge_coverage(coverage, detail)
         if kb < 51200 and not detail.get('denied_count'):
@@ -376,17 +423,19 @@ def main():
         system, groups = scan_macos()
     elif sys.platform.startswith("win"):
         if args.all_drives:
-            from scan_windows_full import fixed_drives, watch_paths, scan_roots
+            from scan_windows_full import watch_paths, scan_roots
             roots = fixed_drives()
             def progress(row):
                 print(json.dumps({'scan_progress': row}, ensure_ascii=True), file=sys.stderr, flush=True)
             groups, diagnostics = scan_roots(roots, watch_paths(roots), progress=progress if args.progress else None)
             # Full scans only emit drive_* groups; the recycle bin is exactly
             # where deleted-but-not-freed space hides, so list it per drive.
-            groups["recycle_bin"] = recycle_bins_all_drives(roots, coverage=diagnostics)
+            recycle_coverage = Coverage()
+            groups["recycle_bin"] = recycle_bins_all_drives(roots, coverage=recycle_coverage)
+            merge_coverage(diagnostics, recycle_coverage, include_volumes=False)
             system = system_info_windows()
         else:
-            diagnostics = {}
+            diagnostics = Coverage()
             system, groups = scan_windows(coverage=diagnostics)
     else:
         print(json.dumps({"error": "unsupported_platform", "platform": sys.platform,
