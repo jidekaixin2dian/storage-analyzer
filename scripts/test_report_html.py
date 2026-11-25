@@ -63,9 +63,19 @@ class ReportEmbeddingTests(unittest.TestCase):
             self.assert_report(out.read_text(encoding='utf-8'), None)
 
     def test_served_report_preserves_data_and_action_config(self):
-        with patch.object(server, 'DATA', self.data), \
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(server, 'DATA', self.data), \
                 patch.object(server, 'TPL', self.template), \
+                patch.object(server, 'DATA_SOURCE'), \
+                patch.object(server, 'DATA_MTIME'), \
+                patch.object(server, 'DATA_DIGEST'), \
+                patch.object(server, 'RM_ALLOW'), \
+                patch.object(server, 'TRASH_ALLOW'), \
+                patch.object(server, 'OPEN_ALLOW'), \
                 patch.object(server, 'TOKEN', 'test-token-only'):
+            src = Path(tmp)/'analysis.json'
+            src.write_text(json.dumps(self.data), encoding='utf-8')
+            server.load(src)
             http = ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
             thread = threading.Thread(target=http.serve_forever, daemon=True)
             thread.start()

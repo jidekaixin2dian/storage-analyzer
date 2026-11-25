@@ -1,5 +1,6 @@
 import json
 import ctypes
+import hashlib
 import os
 import tempfile
 import threading
@@ -7,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 import server
@@ -20,12 +22,18 @@ class ActionSafetyTests(unittest.TestCase):
         self.first, self.second = self.home/'first', self.home/'second'
         self.first.write_text('keep until authorized', encoding='utf-8')
         self.second.write_text('second fixture', encoding='utf-8')
-        self.patches = [patch.object(server, 'HOME',str(self.home.resolve())),
-                        patch.object(server, 'RM_ALLOW',{str(self.first.resolve()), str(self.second.resolve()), str(self.home.resolve())}),
-                        patch.object(server, 'TOKEN','test-only-token')]
-        for item in self.patches:
+        self.analysis_path = self.home/'analysis.json'
+        self.analysis_path.write_text(json.dumps({'green': [
+            {'trash_paths': [str(self.first), str(self.second), str(self.home)]}]}), encoding='utf-8')
+        patches = [patch.object(server, key) for key in
+                   ('DATA', 'TPL', 'DATA_SOURCE', 'DATA_MTIME', 'DATA_DIGEST',
+                    'RM_ALLOW', 'TRASH_ALLOW', 'OPEN_ALLOW')]
+        patches.extend([patch.object(server, 'HOME', str(self.home.resolve())),
+                        patch.object(server, 'TOKEN', 'test-only-token')])
+        for item in patches:
             item.start()
             self.addCleanup(item.stop)
+        server.load(self.analysis_path)
         self.http = ThreadingHTTPServer(('127.0.0.1',0),server.Handler)
         thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         thread.start()
@@ -153,6 +161,73 @@ class ActionSafetyTests(unittest.TestCase):
     def test_heartbeat_never_bypasses_proxy_for_remote_host(self):
         with self.assertRaises(ValueError):
             server.local_urlopen('http://example.com/heartbeat')
+
+    def test_rebuilt_analysis_with_identical_mtime_invalidates_old_page_and_actions(self):
+        url = f'http://127.0.0.1:{self.http.server_port}/'
+        self.assertTrue(server.reusable_report(url))
+        with server.local_urlopen(url+'heartbeat') as response:
+            info = json.load(response)
+        self.assertEqual(info['digest'], hashlib.sha256(self.analysis_path.read_bytes()).hexdigest())
+        mtime = self.analysis_path.stat().st_mtime_ns
+        replacement = self.home/'replacement.json'
+        replacement.write_text('{"green":[]}', encoding='utf-8')
+        os.utime(replacement, ns=(mtime, mtime))
+        replacement.replace(self.analysis_path)
+        self.assertEqual(self.analysis_path.stat().st_mtime_ns, mtime)
+        with self.assertRaises(urllib.error.HTTPError) as heartbeat:
+            server.local_urlopen(url+'heartbeat')
+        with heartbeat.exception as response:
+            self.assertEqual(response.code, 409)
+            changed = json.load(response)
+        self.assertEqual(changed['digest'], info['digest'])
+        self.assertFalse(changed['ok'])
+        self.assertEqual(changed['mtime_ns'], info['mtime_ns'])
+        self.assertNotEqual(changed['digest'], hashlib.sha256(self.analysis_path.read_bytes()).hexdigest())
+        with self.assertRaises(urllib.error.HTTPError) as page:
+            server.local_urlopen(url)
+        with page.exception as response:
+            self.assertEqual(response.code, 409)
+        code, error = self.action([str(self.first)])
+        self.assertEqual(code, 409)
+        self.assertIn('分析文件已更新', error['error'])
+        self.assertTrue(self.first.exists())
+
+    def test_overlapping_requests_are_rejected_and_independent_card_still_works(self):
+        parent = self.home/'directory'
+        parent.mkdir()
+        child = parent/'child'
+        child.write_bytes(b'demo')
+        started = threading.Event()
+        finish = threading.Event()
+        delete = server.hard_delete
+
+        def blocked_delete(path):
+            if path == str(parent.resolve()):
+                started.set()
+                if not finish.wait(5):
+                    raise TimeoutError('fixture timed out')
+            delete(path)
+
+        allowed = server.RM_ALLOW | {str(parent.resolve()), str(child.resolve())}
+        with patch.object(server, 'RM_ALLOW', allowed), \
+                patch.object(server, 'hard_delete', side_effect=blocked_delete), \
+                ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(self.action, [str(parent)])
+            try:
+                self.assertTrue(started.wait(3))
+                for overlap in (parent, child):
+                    code, _ = self.action([str(overlap), str(self.second)])
+                    self.assertEqual(code, 409)
+                    self.assertTrue(child.is_file())
+                    self.assertTrue(self.second.is_file())
+                code, _ = self.action([str(self.second)])
+                self.assertEqual(code, 200)
+                self.assertFalse(self.second.exists())
+            finally:
+                finish.set()
+            code, _ = pending.result(3)
+            self.assertEqual(code, 200)
+            self.assertFalse(parent.exists())
 
     @unittest.skipUnless(os.name == 'nt', 'Windows fixed-volume open support')
     def test_other_local_path_can_be_opened_but_not_deleted(self):

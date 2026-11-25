@@ -41,11 +41,16 @@ class ScanDiagnosticsTests(unittest.TestCase):
                 raise PermissionError('synthetic drive denial')
             return 4096, 1024, 3072
 
-        with patch.object(scan.os.path, 'exists', side_effect=lambda p: p in ('X:\\', 'Y:\\')), \
+        with patch.object(scan, 'fixed_drives', return_value=['X:\\']), \
+                patch.object(scan.os.path, 'exists', side_effect=lambda p: p == 'Y:\\'), \
                 patch.object(scan.shutil, 'disk_usage', side_effect=capacity), \
                 self.assertLogs(level='WARNING') as logs:
             drives = scan.list_drives_windows()
-        self.assertEqual([d['name'] for d in drives], ['Y:\\'])
+        self.assertEqual([d['name'] for d in drives], ['X:\\', 'Y:\\'])
+        self.assertEqual([d['total'] for d in drives], ['?', '4 KB'])
+        self.assertEqual(drives[1]['total_bytes'], 4096)
+        self.assertIn('PermissionError', drives[0]['capacity_error'])
+        self.assertIn('synthetic drive denial', drives[0]['capacity_error'])
         self.assertIn('X:\\', '\n'.join(logs.output))
         self.assertIn('synthetic drive denial', '\n'.join(logs.output))
 

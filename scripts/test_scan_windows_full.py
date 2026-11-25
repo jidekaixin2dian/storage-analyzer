@@ -1,4 +1,7 @@
 import os
+import stat
+from contextlib import nullcontext
+from types import SimpleNamespace
 import io
 import json
 import shutil
@@ -6,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from scan_windows_full import scan_roots, api_path, display_path
+from scan_windows_full import Coverage, scan_roots, api_path, display_path
 import scan
 
 
@@ -70,6 +73,108 @@ class VolumeScanTests(unittest.TestCase):
         rows = scan.scandir_children(str(self.a/'gone'), coverage=coverage)
         self.assertTrue(rows[0]['partial'])
         self.assertEqual(coverage['denied'][0]['reason'], 'not_found')
+
+    def test_overlapping_scans_keep_one_volume_and_monotonic_failures(self):
+        actual = os.scandir
+        def denied(path):
+            if Path(display_path(os.fspath(path))) == self.a/'nested':
+                raise PermissionError('synthetic overlapping denial')
+            return actual(path)
+        coverage = {}
+        with patch('scan_windows_full.os.scandir', side_effect=denied):
+            scan.scandir_children(str(self.a), min_kb=0, coverage=coverage)
+            scan.dir_size_bytes(str(self.a), coverage)
+        self.assertEqual(coverage['denied_count'], 1)
+        self.assertEqual(coverage['status'], 'partial')
+        self.assertEqual(len(coverage['volumes']), 1)
+        self.assertEqual(coverage['volumes'][0]['bytes'], 0)
+
+        # A later successful view must not erase an earlier partial result.
+        scan.dir_size_bytes(str(self.b), coverage)
+        self.assertEqual(coverage['denied_count'], 1)
+        self.assertEqual(coverage['status'], 'partial')
+        self.assertEqual(len(coverage['volumes']), 2)
+
+    def test_independent_scan_failures_are_counted_once_each(self):
+        first, second = self.a/'denied-a', self.b/'denied-b'
+        first.mkdir()
+        second.mkdir()
+        actual = os.scandir
+        def denied(path):
+            target = Path(display_path(os.fspath(path)))
+            if target in (first, second):
+                raise PermissionError('synthetic independent denial')
+            return actual(path)
+        coverage = {}
+        with patch('scan_windows_full.os.scandir', side_effect=denied):
+            scan.dir_size_bytes(str(self.a), coverage)
+            scan.dir_size_bytes(str(self.b), coverage)
+            scan.dir_size_bytes(str(self.a), coverage)
+        self.assertEqual(coverage['denied_count'], 2)
+        self.assertEqual(len(coverage['denied']), 2)
+        self.assertEqual(coverage['status'], 'partial')
+
+    def test_truncated_failure_samples_keep_monotonic_count(self):
+        def source(count):
+            return {'size_basis': 'synthetic', 'denied_count': count,
+                    'denied': [{'path': 'failure-%d' % i, 'error': 'x'}
+                               for i in range(min(count, 2))],
+                    'skipped_reparse_count': 0, 'skipped_reparse': [],
+                    'groups': {}, 'volumes': []}
+        coverage = {}
+        scan.merge_coverage(coverage, source(3))
+        self.assertEqual(coverage['denied_count'], 3)
+        scan.merge_coverage(coverage, source(1))
+        self.assertEqual(coverage['denied_count'], 3)
+        self.assertEqual(coverage['status'], 'partial')
+
+    def test_independent_roots_keep_all_counts_beyond_sample_limits(self):
+        class Entry:
+            def __init__(self, root, name, link):
+                self.name = name
+                self.path = str(root/name)
+                self.link = link
+
+            def stat(self, follow_symlinks=False):
+                if self.link:
+                    return SimpleNamespace(st_mode=stat.S_IFLNK)
+                raise PermissionError('synthetic directory entry')
+
+        def entries(path):
+            root = Path(display_path(os.fspath(path)))
+            return nullcontext(iter(
+                [Entry(root, 'denied-%d' % i, False) for i in range(501)] +
+                [Entry(root, 'link-%d' % i, True) for i in range(101)]))
+
+        coverage = Coverage()
+        with patch('scan_windows_full.os.scandir', side_effect=entries):
+            for root in (self.a, self.b, self.a):
+                scan.dir_size_bytes(str(root), coverage)
+        self.assertEqual(coverage['denied_count'], 1002)
+        self.assertEqual(coverage['skipped_reparse_count'], 202)
+        self.assertEqual(len(coverage['denied']), 500)
+        self.assertEqual(len(coverage['skipped_reparse']), 100)
+        self.assertEqual(len(coverage['volumes']), 2)
+        self.assertTrue(coverage['denied_sample_truncated'])
+        self.assertEqual(coverage['status'], 'partial')
+        self.assertEqual(json.loads(json.dumps(coverage)), dict(coverage))
+
+    def test_volume_alias_and_early_failure_keep_one_record(self):
+        coverage = Coverage()
+        root = str(self.a)
+        alias = '\\\\?\\' + root if os.name == 'nt' else root + '/.'
+        with patch('scan_windows_full.os.scandir', side_effect=PermissionError('first pass')):
+            scan.dir_size_bytes(root, coverage)
+        scan.record_scan_failure(coverage, alias, PermissionError('later pass'))
+        self.assertEqual(coverage['denied_count'], 1)
+        example = self.a/'measured.txt'
+        example.write_bytes(b'1234')
+        measured = scan.dir_size_bytes(alias, coverage)
+        self.assertEqual(coverage['volumes'], [
+            {'root': display_path(alias), 'files': 2, 'directories': 2,
+             'bytes': 7}])
+        self.assertEqual(measured, 7)
+        self.assertEqual(coverage['status'], 'partial')
 
     def test_directory_total_preserves_failure_details(self):
         with patch('scan_windows_full.os.scandir', side_effect=PermissionError('synthetic')):

@@ -23,12 +23,14 @@ SAFETY MODEL — read before changing:
 - Two modes: "trash" (Finder -> Trash, reversible) and "rm" (immediate,
   irreversible). The browser confirms each action before sending.
 """
+import hashlib
 import json
 import os
 import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,9 +44,15 @@ TOKEN = secrets.token_urlsafe(24)
 
 DATA = {}
 TPL = ""
+DATA_SOURCE = None
+DATA_MTIME = None
+DATA_DIGEST = ""
 RM_ALLOW = set()
 TRASH_ALLOW = set()
 OPEN_ALLOW = set()
+ACTIVE_DELETIONS = set()
+DELETION_LOCK = threading.Lock()
+STALE_REPORT = "分析文件已更新或无法读取，请重新运行 server.py 打开报告。"
 
 
 class OperationCancelled(OSError):
@@ -65,9 +73,21 @@ def local_urlopen(url, timeout=2):
     return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout)
 
 
+def read_source(src):
+    with open(src, "rb") as f:
+        mtime = os.fstat(f.fileno()).st_mtime_ns
+        source = f.read()
+        if os.fstat(f.fileno()).st_mtime_ns != mtime:
+            raise OSError("读取过程中分析文件已更新")
+    return source, mtime
+
+
 def load(src):
-    with open(src, encoding="utf-8") as f:
-        data = json.load(f)
+    global DATA, TPL, DATA_SOURCE, DATA_MTIME, DATA_DIGEST
+    global RM_ALLOW, TRASH_ALLOW, OPEN_ALLOW
+    src = os.path.abspath(src)
+    source, mtime = read_source(src)
+    data = json.loads(source.decode("utf-8"))
     with open(TEMPLATE, encoding="utf-8") as f:
         tpl = f.read()
     # 三套白名单，权限从严到宽：
@@ -94,7 +114,29 @@ def load(src):
             rp = expand(p)
             if os.path.exists(rp):
                 open_allow.add(rp)
-    return data, tpl, rm_allow, trash_allow, open_allow
+    DATA, TPL = data, tpl
+    RM_ALLOW, TRASH_ALLOW, OPEN_ALLOW = rm_allow, trash_allow, open_allow
+    DATA_SOURCE, DATA_MTIME, DATA_DIGEST = src, mtime, hashlib.sha256(source).hexdigest()
+
+
+def source_matches():
+    try:
+        source, mtime = read_source(DATA_SOURCE)
+    except OSError:
+        return False
+    return mtime == DATA_MTIME and hashlib.sha256(source).hexdigest() == DATA_DIGEST
+
+
+def reusable_report(url):
+    with local_urlopen(url + "heartbeat", timeout=2) as resp:
+        info = json.load(resp)
+    return (info.get("ok") and info.get("mtime_ns") == DATA_MTIME
+            and info.get("digest") == DATA_DIGEST and source_matches())
+
+
+def paths_overlap(path, other):
+    return (path == other or path.startswith(other.rstrip(os.sep) + os.sep)
+            or other.startswith(path.rstrip(os.sep) + os.sep))
 
 
 def move_to_trash(path):
@@ -190,18 +232,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(b)
 
     def do_GET(self):
         if self.path == "/heartbeat":
-            # 轻量健康检查：返回分析文件 mtime，页面据此判断服务是否存活/是否同源数据
-            try:
-                mtime = int(os.path.getmtime(sys.argv[1]))
-            except OSError:
-                mtime = 0
-            self._send(200, json.dumps({"ok": True, "mtime": mtime}), "application/json")
+            fresh = source_matches()
+            self._send(200 if fresh else 409,
+                       json.dumps({"ok": fresh, "mtime": DATA_MTIME // 10**9,
+                                   "mtime_ns": DATA_MTIME, "digest": DATA_DIGEST}))
         elif self.path in ("/", "/index.html"):
+            if not source_matches():
+                self._send(409, STALE_REPORT, "text/plain; charset=utf-8")
+                return
             html = render_report(TPL, DATA, {"token": TOKEN, "endpoint": "/action"})
             self._send(200, html, "text/html; charset=utf-8")
         else:
@@ -274,11 +318,33 @@ class Handler(BaseHTTPRequestHandler):
         # One parent plus its descendant is not two independent operations.
         if mode != 'open':
             for i, (_, rp) in enumerate(checked):
-                if any(rp == other or rp.startswith(other.rstrip(os.sep) + os.sep)
-                       or other.startswith(rp.rstrip(os.sep) + os.sep)
-                       for _, other in checked[:i]):
+                if any(paths_overlap(rp, other) for _, other in checked[:i]):
                     self._send(400, json.dumps({'ok': False, 'error': '目标路径重复或父子重叠，请分别审查后操作'}))
                     return
+        if not source_matches():
+            self._send(409, json.dumps({"ok": False, "error": STALE_REPORT}))
+            return
+        if mode == "open":
+            self._apply_actions(checked, mode)
+            return
+        # Different cards may run concurrently, but an overlapping destructive
+        # request must stop before starting any path in its batch.
+        targets = {os.path.normcase(rp) for _, rp in checked}
+        with DELETION_LOCK:
+            conflict = any(paths_overlap(path, active)
+                           for path in targets for active in ACTIVE_DELETIONS)
+            if not conflict:
+                ACTIVE_DELETIONS.update(targets)
+        if conflict:
+            self._send(409, json.dumps({"ok": False, "error": "有重叠目标正在处理，请先查看当前操作结果。"}))
+            return
+        try:
+            self._apply_actions(checked, mode)
+        finally:
+            with DELETION_LOCK:
+                ACTIVE_DELETIONS.difference_update(targets)
+
+    def _apply_actions(self, checked, mode):
         done, results = [], []
         for index, (p, rp) in enumerate(checked):
             try:
@@ -313,22 +379,23 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    global DATA, TPL, RM_ALLOW, TRASH_ALLOW, OPEN_ALLOW
-    DATA, TPL, RM_ALLOW, TRASH_ALLOW, OPEN_ALLOW = load(sys.argv[1])
+    load(sys.argv[1])
     # 单实例：同一份分析 JSON 已有存活实例时直接复用，避免多标签页指向死端口
     url_file = os.path.splitext(os.path.abspath(sys.argv[1]))[0] + ".server-url.txt"
     if os.path.exists(url_file):
         try:
             with open(url_file, encoding="utf-8") as f:
                 prev = f.read().strip()
-            with local_urlopen(prev + "heartbeat", timeout=2) as resp:
-                info = json.load(resp)
-            if info.get("ok") and info.get("mtime") == int(os.path.getmtime(sys.argv[1])):
+            if reusable_report(prev):
                 print("已有实例在服务同一份分析：" + prev + "（复用，不再新起）", flush=True)
                 webbrowser.open(prev)
                 return
         except Exception:
             pass  # 旧地址已死或文件过期 -> 正常起新实例
+    if not source_matches():
+        load(sys.argv[1])
+        if not source_matches():
+            sys.exit(STALE_REPORT)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = srv.server_address[1]
     url = "http://127.0.0.1:%d/" % port
@@ -346,7 +413,6 @@ def main():
     except OSError:
         pass
     # 线程内未捕获异常落盘（ThreadingHTTPServer 默认只打到 stderr，agent 后台拉起时看不到）
-    import threading
     crash_log = os.path.splitext(os.path.abspath(sys.argv[1]))[0] + ".server-crash.log"
     def _thread_hook(a):
         try:

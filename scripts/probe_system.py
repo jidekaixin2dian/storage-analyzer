@@ -129,7 +129,7 @@ def _stat_path(path):
     """Measure one file or directory without following links. Read-only."""
     try:
         st = os.stat(api_path(path), follow_symlinks=False)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return {"present": False, "size_bytes": 0, "files": 0, "denied": 0,
                 "skipped_reparse": 0}
     attrs = getattr(st, "st_file_attributes", 0)
@@ -137,7 +137,7 @@ def _stat_path(path):
         return {"present": True, "size_bytes": 0, "files": 0, "denied": 0,
                 "skipped_reparse": 1}
     if stat.S_ISREG(st.st_mode):
-        return {"present": True, "size_bytes": st.st_size, "files": 1,
+        return {"present": True, "size_bytes": st.st_size, "files": 1, "mtime": st.st_mtime,
                 "denied": 0, "skipped_reparse": 0}
     if not stat.S_ISDIR(st.st_mode):
         return {"present": True, "size_bytes": 0, "files": 0, "denied": 0,
@@ -170,12 +170,27 @@ def _stat_path(path):
             "denied": denied, "skipped_reparse": skipped}
 
 
-def _combine(paths):
+def _probe_warning(warnings, path, exc):
+    warnings.append({"path": display_path(path),
+                     "error": "%s: %s" % (type(exc).__name__, exc)})
+
+
+def _measure_path(path, warnings=None):
+    try:
+        return _stat_path(path)
+    except Exception as exc:
+        if warnings is not None:
+            _probe_warning(warnings, path, exc)
+        return {"present": False, "size_bytes": 0, "files": 0, "denied": 1,
+                "skipped_reparse": 0, "partial": True, "error": str(exc)}
+
+
+def _combine(paths, warnings=None):
     """Measure several paths as one item (missing ones are ignored)."""
     result = {"present": False, "size_bytes": 0, "files": 0, "denied": 0,
               "skipped_reparse": 0, "existing": []}
     for path in paths:
-        one = _stat_path(path)
+        one = _measure_path(path, warnings)
         if one["present"]:
             result["present"] = True
             result["existing"].append(path)
@@ -187,7 +202,7 @@ def _combine(paths):
 SYSTEM_FILE_NAMES = ("pagefile.sys", "swapfile.sys", "hiberfil.sys")
 
 
-def system_files_by_drive(names=SYSTEM_FILE_NAMES):
+def system_files_by_drive(names=SYSTEM_FILE_NAMES, warnings=None):
     """Measure page/swap/hibernation files on every fixed drive.
 
     A machine can host its only page file on a non-system volume; that file then
@@ -199,7 +214,7 @@ def system_files_by_drive(names=SYSTEM_FILE_NAMES):
     for drive in fixed_drives():
         for name in names:
             path = os.path.join(drive, name)
-            measured = _stat_path(path)
+            measured = _measure_path(path, warnings)
             if measured.get("present") and (measured.get("size_bytes") or 0) > 0:
                 rows.append({"path": path, "drive": drive.rstrip("/\\"),
                              "name": name,
@@ -224,65 +239,77 @@ WSL_PACKAGE_HINTS = ("canonicalgroup", "ubuntu", "debian", "kali", "suse",
                      "alpine", "oraclelinux", "rockylinux", "archlinux")
 
 
-def wsl_virtual_disks():
+def wsl_virtual_disks(coverage=None):
     """Locate WSL / container VHDX files (read-only metadata only).
 
     A VHDX grows but never shrinks when files are deleted inside the distro, so
     its size is an upper bound on what the guest actually stores. Compacting
     needs an export/unregister/import cycle; `--set-sparse` only affects blocks
-    freed afterwards.
+    freed afterwards. Discovery/stat failures are warnings, not an empty disk.
     """
+    warnings = coverage.setdefault("warnings", []) if coverage is not None else []
+
     local = os.environ.get("LOCALAPPDATA", "")
     search_dirs = []
     if local:
         search_dirs.append(os.path.join(local, "wsl"))
         search_dirs.append(os.path.join(local, "Docker", "wsl"))
         packages = os.path.join(local, "Packages")
-        if os.path.isdir(api_path(packages)):
-            try:
-                with os.scandir(api_path(packages)) as it:
-                    for entry in it:
-                        if not entry.is_dir(follow_symlinks=False):
-                            continue
-                        if any(h in entry.name.lower() for h in WSL_PACKAGE_HINTS):
+        try:
+            with os.scandir(api_path(packages)) as it:
+                for entry in it:
+                    if not any(h in entry.name.lower() for h in WSL_PACKAGE_HINTS):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
                             search_dirs.append(os.path.join(entry.path, "LocalState"))
-            except OSError:
-                pass
+                    except OSError as exc:
+                        _probe_warning(warnings, entry.path, exc)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as exc:
+            _probe_warning(warnings, packages, exc)
     found = []
     for root in search_dirs:
         api_root = api_path(root)
-        if not os.path.isdir(api_root):
+        try:
+            if not stat.S_ISDIR(os.stat(api_root).st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
             continue
-        for dirpath, dirnames, filenames in os.walk(api_root):
+        except OSError as exc:
+            _probe_warning(warnings, root, exc)
+            continue
+
+        def walk_failed(exc, current=api_root):
+            _probe_warning(warnings, exc.filename or current, exc)
+
+        for dirpath, dirnames, filenames in os.walk(api_root, onerror=walk_failed):
             # Depth is measured against the walk root: api_path() adds a \\?\
             # prefix that would otherwise inflate the separator count.
             rel = os.path.relpath(dirpath, api_root)
             depth = 0 if rel == os.curdir else rel.count(os.sep) + 1
-            if depth > 2:
+            if depth >= 2:
                 dirnames[:] = []
-                continue
             for name in filenames:
                 if not name.lower().endswith(".vhdx"):
                     continue
                 full = os.path.join(dirpath, name)
-                measured = _stat_path(full)
-                if not measured.get("present"):
+                measured = _measure_path(full, warnings)
+                if measured.get('error'):
                     continue
+                if not measured.get("present") or measured.get("skipped_reparse"):
+                    _probe_warning(warnings, full, OSError('VHDX was discovered but its size could not be read'))
+                    continue
+                mtime = measured.get("mtime")
                 found.append({"path": display_path(full),
                               "size_bytes": int(measured["size_bytes"]),
                               "size_h": format_size(measured["size_bytes"]),
                               "modified": time.strftime(
                                   "%Y-%m-%d %H:%M",
-                                  time.localtime(_mtime(full)))})
+                                  time.localtime(mtime)) if mtime is not None else "未知"})
     found.sort(key=lambda r: r["size_bytes"], reverse=True)
     return found
-
-
-def _mtime(path):
-    try:
-        return os.stat(api_path(path)).st_mtime
-    except OSError:
-        return 0
 
 
 # ----------------------------------------------------------------------
@@ -518,6 +545,10 @@ def _item(item_id, name, path, measured, kind, risk, brief, note,
         entry["denied"] = int(measured["denied"])
     if measured.get("skipped_reparse"):
         entry["skipped_reparse"] = int(measured["skipped_reparse"])
+    if measured.get("partial") or measured.get("denied"):
+        entry["partial"] = True
+    if measured.get("error"):
+        entry["note"] += " 读取失败：" + measured["error"]
     if link:
         entry["link"] = link
     for key, value in (extra or {}).items():
@@ -536,12 +567,13 @@ def collect(include_driver_usage=True):
                 "seconds": 0}
 
     items = []
+    warnings = []
     usage = driver_usage() if include_driver_usage else {"available": False,
                                                           "reason": "disabled"}
     partitions = recovery_partitions()
 
     # 1. component store
-    m = _stat_path(os.path.join(WINDIR, "WinSxS"))
+    m = _measure_path(os.path.join(WINDIR, "WinSxS"), warnings)
     items.append(_item(
         "winsxs", "组件存储（WinSxS）", os.path.join(WINDIR, "WinSxS"), m,
         "system-store", "high",
@@ -551,7 +583,7 @@ def collect(include_driver_usage=True):
         command="dism /online /cleanup-image /analyzecomponentstore"))
 
     # 2. Installer cache
-    m = _stat_path(os.path.join(WINDIR, "Installer"))
+    m = _measure_path(os.path.join(WINDIR, "Installer"), warnings)
     items.append(_item(
         "installer", "Windows Installer 缓存", os.path.join(WINDIR, "Installer"), m,
         "installer-cache", "medium",
@@ -560,7 +592,7 @@ def collect(include_driver_usage=True):
         "本报告只报总量，不提供删除命令。"))
 
     # 3. DriverStore
-    m = _stat_path(os.path.join(WINDIR, "System32", "DriverStore", "FileRepository"))
+    m = _measure_path(os.path.join(WINDIR, "System32", "DriverStore", "FileRepository"), warnings)
     driver_note = ("第三方驱动仓库。未匹配到当前设备的驱动包不等于可以删除："
                    "断开的设备、待安装设备仍可能引用。")
     if usage.get("available") and not usage.get("partial"):
@@ -588,21 +620,28 @@ def collect(include_driver_usage=True):
         command="reagentc /info"))
 
     # 5. hibernation (any fixed drive)
-    hiber_rows = system_files_by_drive(("hiberfil.sys",))
+    hiber_warnings = []
+    hiber_rows = system_files_by_drive(("hiberfil.sys",), hiber_warnings)
+    warnings.extend(hiber_warnings)
     m = combine_rows(hiber_rows)
+    m["denied"] = len(hiber_warnings)
     items.append(_item(
         "hiberfil", "休眠文件（hiberfil.sys）",
         os.path.join(SYSTEM_DRIVE, "hiberfil.sys"), m,
         "hibernation", "medium",
         "休眠与快速启动使用的内存镜像。",
-        ("当前未检测到休眠文件（休眠可能已关闭）。" if not m["present"] else
+        ("部分盘无法读取休眠文件。" if hiber_warnings else
+         "当前未检测到休眠文件（休眠可能已关闭）。" if not m["present"] else
          "关闭休眠会同时关闭快速启动；笔记本会失去合盖休眠能力。"
          + (" 检测到非系统盘上也有休眠文件，请逐个确认。" if len(hiber_rows) > 1 else "")),
         command="powercfg /h off", extra={"by_drive": hiber_rows}))
 
     # 6. page / swap files (any fixed drive: the only page file often lives off C:)
-    page_rows = system_files_by_drive(("pagefile.sys", "swapfile.sys"))
+    page_warnings = []
+    page_rows = system_files_by_drive(("pagefile.sys", "swapfile.sys"), page_warnings)
+    warnings.extend(page_warnings)
     m = combine_rows(page_rows)
+    m["denied"] = len(page_warnings)
     page_note = ("不建议删除或手工缩小；大小由系统按内存压力管理，"
                  "调整应在「系统属性 > 高级 > 性能」里做。")
     if any(row["drive"].rstrip("/\\").upper() != SYSTEM_DRIVE.rstrip("/\\").upper()
@@ -621,7 +660,7 @@ def collect(include_driver_usage=True):
     old_paths = [os.path.join(SYSTEM_DRIVE, "Windows.old"),
                  os.path.join(SYSTEM_DRIVE, "$Windows.~BT"),
                  os.path.join(SYSTEM_DRIVE, "$Windows.~WS")]
-    m = _combine(old_paths)
+    m = _combine(old_paths, warnings)
     items.append(_item(
         "windows_old", "旧系统备份（Windows.old）",
         "C:\\Windows.old（及 $Windows.~BT / $Windows.~WS）", m,
@@ -632,7 +671,7 @@ def collect(include_driver_usage=True):
 
     # 8. update caches
     m = _combine([os.path.join(WINDIR, "SoftwareDistribution", "Download"),
-                  os.path.join(WINDIR, "SoftwareDistribution", "DeliveryOptimization")])
+                  os.path.join(WINDIR, "SoftwareDistribution", "DeliveryOptimization")], warnings)
     items.append(_item(
         "update_cache", "Windows 更新与传递优化缓存",
         os.path.join(WINDIR, "SoftwareDistribution"), m,
@@ -649,7 +688,7 @@ def collect(include_driver_usage=True):
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "CrashDumps"),
         os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"),
                      "Microsoft", "Windows", "WER"),
-    ])
+    ], warnings)
     items.append(_item(
         "crash_dumps", "崩溃转储与错误报告", "Minidump / WER / CrashDumps", m,
         "diagnostics", "low",
@@ -659,7 +698,7 @@ def collect(include_driver_usage=True):
 
     # 10. logs
     m = _combine([os.path.join(WINDIR, "Logs"),
-                  os.path.join(WINDIR, "Panther")])
+                  os.path.join(WINDIR, "Panther")], warnings)
     items.append(_item(
         "logs", "系统日志与安装日志", os.path.join(WINDIR, "Logs"), m,
         "logs", "low",
@@ -667,7 +706,7 @@ def collect(include_driver_usage=True):
         "可清理，但排障时需要它们；建议按时间保留最近一批。", command=None))
 
     # 11. Prefetch
-    m = _stat_path(os.path.join(WINDIR, "Prefetch"))
+    m = _measure_path(os.path.join(WINDIR, "Prefetch"), warnings)
     items.append(_item(
         "prefetch", "预读取缓存（Prefetch）", os.path.join(WINDIR, "Prefetch"), m,
         "cache", "low",
@@ -675,7 +714,7 @@ def collect(include_driver_usage=True):
         "清理收益通常很小；首次启动会略慢，不建议频繁清。", command=None))
 
     # 12. system temp
-    m = _stat_path(os.path.join(WINDIR, "Temp"))
+    m = _measure_path(os.path.join(WINDIR, "Temp"), warnings)
     items.append(_item(
         "windows_temp", "系统临时目录（Windows\\Temp）",
         os.path.join(WINDIR, "Temp"), m,
@@ -685,21 +724,27 @@ def collect(include_driver_usage=True):
         command=None))
 
     # 13. WSL / container virtual disks
-    disks = wsl_virtual_disks()
+    coverage = {"warnings": []}
+    disks = wsl_virtual_disks(coverage)
+    wsl_warnings = coverage["warnings"]
+    warnings.extend(wsl_warnings)
     m = {"present": bool(disks),
          "size_bytes": sum(d["size_bytes"] for d in disks),
-         "files": len(disks)}
+         "files": len(disks), "partial": bool(wsl_warnings)}
     items.append(_item(
         "wsl_vhdx", "WSL / 容器虚拟磁盘（ext4.vhdx）",
         "AppData\\Local\\wsl / Packages\\*\\LocalState / Docker\\wsl", m,
         "virtual-disk", "medium",
         "WSL 发行版与容器把整个 Linux 文件系统装在一个会增长、不会自己缩小的虚拟磁盘里。"
         "在发行版内删文件，Windows 这边的 vhdx 体积不会跟着变小。",
-        ("未检测到 WSL/容器虚拟磁盘。" if not m["present"] else
+        ("无法确认 WSL/容器虚拟磁盘的体积。" if wsl_warnings and not m["present"] else
+         "未检测到 WSL/容器虚拟磁盘。" if not m["present"] else
          "vhdx 体积是上限而不是「已用」；要真正回收，先 wsl --export 备份，"
          "再 wsl --unregister 删盘、wsl --import 重新导入，最后 "
          "wsl --manage <发行版> --set-sparse true（该参数只对之后删除的块生效，"
-         "对已有数据使用需 --allow-unsafe 且有损坏风险，必须先有可校验的导出备份）。"),
+         "对已有数据使用需 --allow-unsafe 且有损坏风险，必须先有可校验的导出备份）。") +
+        ('\n\n探测有遗漏：'+ '；'.join(w['path']+': '+w['error'] for w in wsl_warnings)
+         if wsl_warnings else ''),
         command="wsl --list --verbose", extra={"disks": disks}))
 
     denied = sum(item.get("denied", 0) for item in items)
@@ -713,7 +758,7 @@ def collect(include_driver_usage=True):
         "driver_usage": usage,
         "recovery": partitions,
         "coverage": {"denied": denied, "skipped_reparse": skipped,
-                     "warnings": []},
+                     "warnings": warnings},
         "elevated_analysis": None,
         "seconds": round(time.time() - started, 1),
     }

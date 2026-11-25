@@ -232,6 +232,7 @@ class CollectShapeTests(unittest.TestCase):
                              return_value={"available": False}), \
                 patch.object(probe_system, "recovery_partitions",
                              return_value={"available": False, "partitions": []}), \
+                patch.object(probe_system, "wsl_virtual_disks", return_value=[]), \
                 patch.object(probe_system, "is_elevated", return_value=False):
             data = probe_system.collect(include_driver_usage=False)
         self.assertIn("items", data)
@@ -307,6 +308,99 @@ class WslDiskTests(unittest.TestCase):
                 stream.write(b"\0" * 1024)
             with patch.dict(os.environ, {"LOCALAPPDATA": local}):
                 self.assertEqual(probe_system.wsl_virtual_disks(), [])
+
+    def test_unreadable_discovered_vhdx_is_reported_as_partial(self):
+        with tempfile.TemporaryDirectory() as local:
+            target = os.path.join(local, "wsl", "Ubuntu", "ext4.vhdx")
+            os.makedirs(os.path.dirname(target))
+            with open(target, "wb") as stream:
+                stream.write(b"\0" * 8192)
+            coverage = {"warnings": []}
+            with patch.dict(os.environ, {"LOCALAPPDATA": local}), \
+                    patch.object(probe_system, "_stat_path",
+                                 return_value={"present": False}):
+                disks = probe_system.wsl_virtual_disks(coverage)
+        self.assertEqual(disks, [])
+        self.assertEqual(len(coverage['warnings']), 1)
+        self.assertIn('ext4.vhdx', coverage['warnings'][0]['path'])
+        self.assertIn('could not be read', coverage['warnings'][0]['error'])
+
+    def test_stat_exception_is_reported_as_partial(self):
+        with tempfile.TemporaryDirectory() as local:
+            target = os.path.join(local, "wsl", "Ubuntu", "ext4.vhdx")
+            os.makedirs(os.path.dirname(target))
+            with open(target, "wb") as stream:
+                stream.write(b"\0" * 8192)
+            coverage = {"warnings": []}
+            with patch.dict(os.environ, {"LOCALAPPDATA": local}), \
+                    patch.object(probe_system, "_stat_path",
+                                 side_effect=PermissionError('synthetic stat denial')):
+                self.assertEqual(probe_system.wsl_virtual_disks(coverage), [])
+        self.assertEqual(len(coverage['warnings']), 1)
+        self.assertIn('PermissionError', coverage['warnings'][0]['error'])
+        self.assertIn('synthetic stat denial', coverage['warnings'][0]['error'])
+
+    def test_walk_denial_is_preserved_in_collect(self):
+        with tempfile.TemporaryDirectory() as local:
+            denied = os.path.join(local, "wsl", "nested")
+            os.makedirs(denied)
+            actual_scandir = os.scandir
+
+            def scandir(path):
+                if probe_system.display_path(os.fspath(path)) == denied:
+                    raise PermissionError(13, 'synthetic walk denial', path)
+                return actual_scandir(path)
+
+            def measure(path):
+                if path.endswith("WinSxS"):
+                    raise PermissionError('synthetic system path denial')
+                return {"present": False, "size_bytes": 0, "files": 0,
+                        "denied": 0, "skipped_reparse": 0}
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": local}), \
+                    patch.object(probe_system, "IS_WINDOWS", True), \
+                    patch.object(probe_system.os, "scandir", side_effect=scandir), \
+                    patch.object(probe_system, "_stat_path", side_effect=measure), \
+                    patch.object(probe_system, "fixed_drives", return_value=[]), \
+                    patch.object(probe_system, "recovery_partitions",
+                                 return_value={"available": False, "partitions": []}):
+                data = probe_system.collect(include_driver_usage=False)
+        warnings = data['coverage']['warnings']
+        self.assertEqual(len(warnings), 2)
+        self.assertEqual(warnings[1]['path'], denied)
+        self.assertIn('synthetic walk denial', warnings[1]['error'])
+        winsxs = next(item for item in data['items'] if item['id'] == 'winsxs')
+        self.assertTrue(winsxs['partial'])
+        self.assertIn('synthetic system path denial', winsxs['note'])
+        wsl = next(item for item in data['items'] if item['id'] == 'wsl_vhdx')
+        self.assertTrue(wsl['partial'])
+        self.assertFalse(wsl['present'])
+        self.assertIn('探测有遗漏', wsl['note'])
+        self.assertNotIn('未检测到', wsl['note'])
+
+    def test_unreadable_root_does_not_hide_disks_under_other_roots(self):
+        with tempfile.TemporaryDirectory() as local:
+            denied = os.path.join(local, "wsl")
+            target = os.path.join(local, "Docker", "wsl", "ext4.vhdx")
+            os.makedirs(denied)
+            os.makedirs(os.path.dirname(target))
+            with open(target, "wb") as stream:
+                stream.write(b"\0" * 8192)
+            actual_stat = os.stat
+
+            def guarded_stat(path, *args, **kwargs):
+                if probe_system.display_path(os.fspath(path)) == denied:
+                    raise PermissionError(13, 'synthetic root denial', path)
+                return actual_stat(path, *args, **kwargs)
+
+            coverage = {"warnings": []}
+            with patch.dict(os.environ, {"LOCALAPPDATA": local}), \
+                    patch.object(probe_system.os, "stat", side_effect=guarded_stat):
+                disks = probe_system.wsl_virtual_disks(coverage)
+        self.assertEqual([disk['path'] for disk in disks], [target])
+        self.assertEqual(len(coverage['warnings']), 1)
+        self.assertEqual(coverage['warnings'][0]['path'], denied)
+        self.assertIn('synthetic root denial', coverage['warnings'][0]['error'])
 
 
 class TemplateTests(unittest.TestCase):
