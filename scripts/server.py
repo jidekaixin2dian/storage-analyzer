@@ -23,6 +23,7 @@ SAFETY MODEL — read before changing:
 - Two modes: "trash" (Finder -> Trash, reversible) and "rm" (immediate,
   irreversible). The browser confirms each action before sending.
 """
+import ctypes
 import hashlib
 import json
 import os
@@ -200,8 +201,156 @@ def hard_delete(path):
         os.remove(path)
 
 
+WIN_WAIT_TIMEOUT = 3.0   # 等资源管理器窗口出现的上限（秒）
+WIN_FOCUS_TIMEOUT = 2.5  # 反复尝试置前的上限（秒）
+
+
+def _win_cabinet_windows():
+    """当前桌面上所有资源管理器文件夹窗口（CabinetWClass）的句柄。"""
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
+    found = []
+
+    def _collect(hwnd, _lparam):
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, name, 64)
+        if name.value == "CabinetWClass":
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(enum_proc(_collect), 0)
+    return found
+
+
+def _win_title(hwnd):
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    buf = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(hwnd, buf, 512)
+    return buf.value
+
+
+def _win_foreground():
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    return user32.GetForegroundWindow()
+
+
+def _win_shell_execute(target):
+    """用 ShellExecuteW + SW_SHOWNORMAL 打开文件夹。
+
+    直接 subprocess 起 explorer.exe 会继承本进程的窗口显示状态：报告服务常常是
+    从后台/服务/WMI（STARTF_USESHOWWINDOW=SW_HIDE）拉起的，explorer 就把文件夹
+    窗口建成隐藏/最小化，看起来像"静默打开、不弹窗"。ShellExecuteW 显式传
+    SW_SHOWNORMAL，交给已经在跑的桌面 shell 去开，新窗口才是正常尺寸并置前。
+    """
+    from ctypes import wintypes
+    shell32 = ctypes.windll.shell32
+    shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                      wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+    shell32.ShellExecuteW.restype = ctypes.c_void_p
+    rc = shell32.ShellExecuteW(None, "open", target, None, None, 1)  # SW_SHOWNORMAL
+    return bool(rc) and int(rc) > 32  # <=32 是错误码
+
+
+def _win_focus_window(hwnd, timeout=None):
+    """恢复并置前窗口；返回是否确认已在前台。"""
+    from ctypes import wintypes
+    timeout = WIN_FOCUS_TIMEOUT if timeout is None else timeout
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    user32.BringWindowToTop.restype = wintypes.BOOL
+    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    user32.AttachThreadInput.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE：最小化窗口先还原
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _win_foreground() == hwnd:
+            return True
+        user32.SetForegroundWindow(hwnd)
+        if _win_foreground() == hwnd:
+            return True
+        # 前台锁：把当前线程临时挂到前台窗口的输入队列上再抢一次
+        fg = _win_foreground()
+        if fg:
+            fg_tid = user32.GetWindowThreadProcessId(fg, None)
+            cur_tid = kernel32.GetCurrentThreadId()
+            if fg_tid and fg_tid != cur_tid and user32.AttachThreadInput(cur_tid, fg_tid, True):
+                try:
+                    user32.BringWindowToTop(hwnd)
+                    user32.SetForegroundWindow(hwnd)
+                finally:
+                    user32.AttachThreadInput(cur_tid, fg_tid, False)
+        if _win_foreground() == hwnd:
+            return True
+        # 兜底：SwitchToThisWindow（未文档化，但对资源管理器窗口稳定）
+        try:
+            user32.SwitchToThisWindow(hwnd, True)
+        except Exception:
+            pass
+        if _win_foreground() == hwnd:
+            return True
+        time.sleep(0.15)
+    return _win_foreground() == hwnd
+
+
+def _win_wait_for_window(target, before, timeout=None):
+    """等目标文件夹的窗口出现；返回句柄或 None。
+
+    优先取"新出现的 CabinetWClass 窗口"（准确）；没有新窗口说明该文件夹本来就
+    开着、shell 直接复用了它，退回标题匹配。
+    """
+    timeout = WIN_WAIT_TIMEOUT if timeout is None else timeout
+    base = os.path.basename(os.path.normpath(target)).lower()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        fresh = [h for h in _win_cabinet_windows() if h not in before]
+        if fresh:
+            for hwnd in fresh:
+                if base and base in _win_title(hwnd).lower():
+                    return hwnd
+            return fresh[0]
+        time.sleep(0.1)
+    if base:
+        for hwnd in _win_cabinet_windows():
+            if base in _win_title(hwnd).lower():
+                return hwnd
+    return None
+
+
+def _win_open_folder(target):
+    """在资源管理器打开 target 并置前；返回 'foreground' / 'background'。"""
+    before = set(_win_cabinet_windows())
+    if not _win_shell_execute(target):
+        subprocess.run(["explorer", target])  # 兜底：可能仍继承隐藏状态，但至少能打开
+    hwnd = _win_wait_for_window(target, before)
+    if hwnd is None:
+        return "background"
+    return "foreground" if _win_focus_window(hwnd) else "background"
+
+
 def open_in_file_manager(path):
-    # 非破坏性：在访达 / 资源管理器里打开该位置，方便用户自己审查删除
+    """非破坏性：在访达 / 资源管理器里打开并尽量置前，方便用户自己审查删除。
+
+    返回 'foreground'（已确认在前台）/ 'background'（已打开但没抢到前台）/
+    'opened'（macOS：已交给访达，前台由系统决定）。
+    """
     target = path if os.path.isdir(path) else os.path.dirname(path)
     if sys.platform == "darwin":
         # .app 是 bundle，对它用 open 会"启动应用"而非显示；必须用 open -R 在访达里选中。
@@ -209,7 +358,7 @@ def open_in_file_manager(path):
             r = subprocess.run(["open", "-R", target], capture_output=True, text=True)
             if r.returncode != 0:
                 raise OSError((r.stderr or "open -R 失败").strip())
-            return
+            return "opened"
         # 普通文件夹：先试直接打开看内容；沙盒容器（如微信）open 会报 -10814，
         # 退回 open -R 在父目录里选中它。两者都失败才算错。
         r = subprocess.run(["open", target], capture_output=True, text=True)
@@ -217,8 +366,9 @@ def open_in_file_manager(path):
             r2 = subprocess.run(["open", "-R", target], capture_output=True, text=True)
             if r2.returncode != 0:
                 raise OSError((r.stderr or r2.stderr or "open 失败").strip())
+        return "opened"
     elif sys.platform.startswith("win"):
-        subprocess.run(["explorer", target])  # explorer 退出码不可靠，不据此判成败
+        return _win_open_folder(target)
     else:
         raise OSError("打开文件夹仅支持 macOS / Windows")
 
@@ -347,12 +497,15 @@ class Handler(BaseHTTPRequestHandler):
     def _apply_actions(self, checked, mode):
         done, results = [], []
         for index, (p, rp) in enumerate(checked):
+            open_state = None
             try:
                 outcome = 'completed'
                 if mode == "open":
                     if not os.path.exists(rp):
                         raise FileNotFoundError('目标路径已不存在：' + p)
-                    open_in_file_manager(rp)
+                    open_state = open_in_file_manager(rp)
+                    if open_state not in ('foreground', 'background', 'opened'):
+                        open_state = 'opened'  # 只允许这三个值进 JSON，避免脏返回污染响应
                     outcome = 'submitted'
                 elif not os.path.exists(rp):
                     outcome = 'already_missing'
@@ -363,7 +516,10 @@ class Handler(BaseHTTPRequestHandler):
                 if mode != 'open' and os.path.lexists(rp):
                     raise OSError('操作返回后目标仍存在，请检查实际内容；目录可能已部分处理')
                 done.append(p)
-                results.append({'path': p, 'status': outcome})
+                entry = {'path': p, 'status': outcome}
+                if mode == 'open':
+                    entry['open_state'] = open_state
+                results.append(entry)
             except Exception as e:
                 status = 'cancelled' if isinstance(e, OperationCancelled) else 'failed'
                 results.append({'path': p, 'status': status, 'error': str(e)})
@@ -371,8 +527,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, json.dumps({"ok": False, "status": 'partial' if done else status,
                                            "error": str(e), "done": done, "failed": p, "results": results}))
                 return
-        self._send(200, json.dumps({"ok": True, "done": done, "status": 'submitted' if mode == 'open' else 'completed',
-                                   "results": results}))
+        payload = {"ok": True, "done": done,
+                   "status": 'submitted' if mode == 'open' else 'completed',
+                   "results": results}
+        if mode == 'open':
+            # 只有确认抢到前台才算"已弹出"；否则前端提示用户看任务栏
+            payload['focused'] = all(r.get('open_state') == 'foreground' for r in results)
+        self._send(200, json.dumps(payload))
 
 
 def main():

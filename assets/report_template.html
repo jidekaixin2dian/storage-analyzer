@@ -523,7 +523,8 @@ async function doOpen(btn){
   if(!paths.length) { invalidActionPaths(wrap); return; }
   const res = await postAction(wrap, paths, 'open');
   const status = wrap.querySelector('.del-status');
-  if(res.ok){ status.textContent='已提交到'+FM+'的打开请求；请检查窗口，本操作未清理文件'; status.className='del-status ok'; }
+  if(res.ok && res.focused){ status.textContent='已在'+FM+'打开并置于前台；本操作未清理任何文件'; status.className='del-status ok'; }
+  else if(res.ok){ status.textContent='已在'+FM+'打开，但窗口没能置前（可能被前台锁挡住）；请点任务栏上的文件夹窗口。本操作未清理任何文件'; status.className='del-status ok'; }
   else { status.textContent='未全部打开：'+(res.error||'失败')+'；已提交 '+(res.done||[]).length+' 个路径'; status.className='del-status err'; }
 }
 

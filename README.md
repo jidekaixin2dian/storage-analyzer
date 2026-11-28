@@ -40,6 +40,13 @@
 
 这些改动继续沿用现有删除白名单与确认流程，未扩大可删除范围；验证使用临时合成样本，不替代真实桌面回收站验收。
 
+## v1.7.0 更新
+
+- 修掉 Windows 上「在资源管理器里打开」的静默打开：报告服务常由后台/服务/WMI 拉起，`subprocess` 起的 `explorer.exe` 会继承 `SW_HIDE` 启动状态，文件夹窗口可见却不置前。现在改用 `ShellExecuteW` + `SW_SHOWNORMAL`，再用 `EnumWindows` 定位新出现的 `CabinetWClass` 窗口，按 `ShowWindow` → `SetForegroundWindow` → `AttachThreadInput` → `SwitchToThisWindow` 逐级抢前台。
+- `/action` 的 open 响应新增 `open_state`（`foreground` / `background` / `opened`）与 `focused`，页面据此区分「已在资源管理器打开并置于前台」和「已打开但窗口没能置前，请点任务栏」。
+- 新增 3 项回归测试（新窗口置前、`ShellExecuteW` 失败时回退 `explorer`、响应里 `focused`/`open_state` 的正确性）；全量 `unittest discover` 84 项通过，模板运行时测试通过。
+- 真机对照实测（同一台 Win11、同样以 WMI 后台方式拉起）：旧实现窗口 `visible=true` 但 `foreground=false`；新实现 `foreground=true`。
+
 ## 安装
 
 把本仓库克隆到你的 agent skills 目录（以 Claude Code / pi 等支持 Agent Skills 的环境为例）：

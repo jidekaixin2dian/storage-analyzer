@@ -114,13 +114,44 @@ class ActionSafetyTests(unittest.TestCase):
         self.assertTrue(self.first.exists())
 
     def test_open_is_only_submitted_and_missing_target_fails(self):
-        with patch.object(server, 'OPEN_ALLOW', {str(self.first.resolve())}), patch.object(server, 'open_in_file_manager'):
+        with patch.object(server, 'OPEN_ALLOW', {str(self.first.resolve())}), \
+                patch.object(server, 'open_in_file_manager', return_value='opened'):
             code, result = self.action([str(self.first)], mode='open')
             self.assertEqual(code, 200)
             self.assertEqual(result['results'][0]['status'], 'submitted')
             self.first.unlink()
             code, result = self.action([str(self.first)], mode='open')
             self.assertEqual(code, 500)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows explorer foreground contract')
+    def test_open_windows_uses_shell_execute_and_focuses_new_window(self):
+        focused = []
+        with patch.object(server, 'WIN_WAIT_TIMEOUT', 0.2), \
+                patch.object(server, '_win_cabinet_windows', side_effect=[[11], [11, 22]]), \
+                patch.object(server, '_win_shell_execute', return_value=True) as shell, \
+                patch.object(server, '_win_title', return_value='somewhere'), \
+                patch.object(server, '_win_focus_window',
+                             side_effect=lambda hwnd, timeout=None: focused.append(hwnd) or True):
+            self.assertEqual(server.open_in_file_manager(str(self.home)), 'foreground')
+        shell.assert_called_once()
+        self.assertEqual(focused, [22])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows explorer foreground contract')
+    def test_open_windows_falls_back_to_explorer_when_shell_execute_fails(self):
+        with patch.object(server, 'WIN_WAIT_TIMEOUT', 0.2), \
+                patch.object(server, '_win_cabinet_windows', return_value=[]), \
+                patch.object(server, '_win_shell_execute', return_value=False), \
+                patch.object(server.subprocess, 'run') as run:
+            self.assertEqual(server.open_in_file_manager(str(self.home)), 'background')
+        self.assertEqual(run.call_args[0][0][0], 'explorer')
+
+    def test_open_reports_foreground_state_in_payload(self):
+        with patch.object(server, 'OPEN_ALLOW', {str(self.first.resolve())}), \
+                patch.object(server, 'open_in_file_manager', return_value='foreground'):
+            code, result = self.action([str(self.first)], mode='open')
+        self.assertEqual(code, 200)
+        self.assertTrue(result['focused'])
+        self.assertEqual(result['results'][0]['open_state'], 'foreground')
 
     def test_overlapping_batch_is_rejected_before_mutation(self):
         parent = self.home/'parent'
@@ -234,7 +265,8 @@ class ActionSafetyTests(unittest.TestCase):
         other = tempfile.TemporaryDirectory()
         self.addCleanup(other.cleanup)
         path = str(Path(other.name).resolve())
-        with patch.object(server,'OPEN_ALLOW',{path}), patch.object(server,'open_in_file_manager') as opened:
+        with patch.object(server,'OPEN_ALLOW',{path}), \
+                patch.object(server,'open_in_file_manager', return_value='opened') as opened:
             code,_ = self.action([path],mode='open')
             self.assertEqual(code,200)
             opened.assert_called_once_with(path)

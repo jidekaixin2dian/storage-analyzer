@@ -119,7 +119,7 @@ python3 scripts/server.py /tmp/storage_analysis.json   # 自动开浏览器，Ct
 ```powershell
 py -3 scripts\server.py "$env:TEMP\storage_analysis.json"   # Windows 同上
 ```
-`server.py` 起在 127.0.0.1 + 随机端口 + 随机 token。🟢 项给「移到废纸篓/回收站」(可逆) +「直接删除」(立即释放、不可逆)；🟡 项给「在访达/资源管理器打开」+（有安全子路径时）「移到废纸篓/回收站」（按钮文案按系统自动切换）。**安全模型——三套白名单，权限从严到宽**：`rm` 只允许绿灯 `trash_paths`；`trash` 允许绿灯+橙灯 `trash_paths`（橙灯永远不能 rm）；`open`（在文件管理器打开，非破坏性）允许上述全部 + 橙灯真实 `path`。所有请求 realpath 校验 + **rm/trash 只允许 $HOME 内**（`open` 才额外放行 `/Applications` 与 Program Files）+ token + Host 校验，每次点击浏览器先 confirm。osascript/SHFileOperationW 入废纸篓，macOS 首次弹访达自动化授权点允许即可。
+`server.py` 起在 127.0.0.1 + 随机端口 + 随机 token。🟢 项给「移到废纸篓/回收站」(可逆) +「直接删除」(立即释放、不可逆)；🟡 项给「在访达/资源管理器打开」+（有安全子路径时）「移到废纸篓/回收站」（按钮文案按系统自动切换）。**安全模型——三套白名单，权限从严到宽**：`rm` 只允许绿灯 `trash_paths`；`trash` 允许绿灯+橙灯 `trash_paths`（橙灯永远不能 rm）；`open`（在文件管理器打开，非破坏性）允许上述全部 + 橙灯真实 `path`。所有请求 realpath 校验 + **rm/trash 只允许 $HOME 内**（`open` 才额外放行 `/Applications` 与 Program Files）+ token + Host 校验，每次点击浏览器先 confirm。osascript/SHFileOperationW 入废纸篓，macOS 首次弹访达自动化授权点允许即可。**「在访达/资源管理器打开」必须真正弹到前台**：Windows 上用 `ShellExecuteW(..., SW_SHOWNORMAL)` 拉起（`subprocess` 起 `explorer.exe` 会继承后台进程被设成 `SW_HIDE` 的窗口状态，窗口静默出现、不置前），再 `EnumWindows` 找新出现的 `CabinetWClass` 窗口逐级 `ShowWindow`/`SetForegroundWindow`/`AttachThreadInput`/`SwitchToThisWindow` 抢前台；`/action` 响应带 `open_state`（`foreground`/`background`/`opened`）与 `focused`，页面据此提示「已置于前台」还是「窗口没能置前，请看任务栏」。
 
 仅当用户明确只想要一份可分享/留存的只读文件时，才用静态模式（无删除按钮，因为 `file://` 打开的页面碰不到文件系统）：
 ```bash
@@ -131,7 +131,7 @@ py -3 scripts\build_report.py "$env:TEMP\storage_analysis.json" "$env:USERPROFIL
 start "$env:USERPROFILE\Desktop\storage-report.html"
 ```
 
-**排障：网页上没有删除/移废纸篓按钮**。静态报告需用 `server.py` 打开交互版。若 🟢 项漏了 `trash_paths`，补上后重新运行服务。**排障：页面提示「连接失败」或「服务已断开」**。先检查目标是否已处理，再重新运行 `server.py` 打开报告。v1.6.0 服务只复用 mtime 和 SHA-256 都相同的分析文件，分析更新后会拒绝旧页面的操作。升级前先退出旧版报告服务。
+**排障：网页上没有删除/移废纸篓按钮**。静态报告需用 `server.py` 打开交互版。若 🟢 项漏了 `trash_paths`，补上后重新运行服务。**排障：页面提示「连接失败」或「服务已断开」**。先检查目标是否已处理，再重新运行 `server.py` 打开报告。v1.6.0 服务只复用 mtime 和 SHA-256 都相同的分析文件，分析更新后会拒绝旧页面的操作。升级前先退出旧版报告服务。**排障：点「在资源管理器里打开」窗口静默出现、不弹到前台**。报告服务常由后台/服务/WMI 拉起，子进程会继承 `SW_HIDE` 启动状态，`subprocess` 起的 `explorer.exe` 就把文件夹窗口建成隐藏/最小化；现版本改用 `ShellExecuteW` + `SW_SHOWNORMAL` 并轮询置前，页面会明确回报「已置于前台」或「窗口没能置前」。仍被挡住时多半是 Windows 前台锁（有程序正在抢焦点），点任务栏上的文件夹窗口即可，不影响功能。
 
 报告阅读流：磁盘概览与扫描范围 → 主要占用清单（展开路径与依据）和处理顺序 → 绿黄红建议与操作 → 系统占用（只读）→ 长期建议。桌面并列展示占用与覆盖 / 优先建议，窄屏先提示扫描遗漏，再纵向列出排行。系统空间保持只读并放在建议之后，避免专项说明挡住普通处理流程。所有路径与口径信息保留。
 
@@ -173,6 +173,7 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
   - 扫描补 `recycle_bin` 组（`C:\$Recycle.Bin` 聚合），回收站不再漏在扫描范围外；
   - 二级护栏收紧：rm/trash 的根目录只认 $HOME，`/Applications` 与 Program Files 仅在 `open` 下放行（此前 rm 也能拿到 /Applications）；
   - 报告文案按系统切换「废纸篓/回收站」「访达/资源管理器」，Windows 上不再显示访达。
+  - 「在资源管理器打开」修掉静默打开：改 `ShellExecuteW` + `SW_SHOWNORMAL`（`subprocess` 起的 `explorer.exe` 会继承后台进程的 `SW_HIDE`），再用 `EnumWindows` 定位新 `CabinetWClass` 窗口、`ShowWindow`/`SetForegroundWindow`/`AttachThreadInput`/`SwitchToThisWindow` 逐级置前；`/action` 响应新增 `open_state` 与 `focused`，页面区分「已置于前台」与「窗口没能置前」。真机对照实测：旧实现窗口 `visible=true` 但 `foreground=false`，新实现 `foreground=true`。
   - 新增 `system_space` 只读系统探测（WinSxS / Installer / DriverStore / 恢复分区 / 休眠 / Windows.old / 更新缓存 / 转储 / 日志 / Prefetch / 系统 Temp），真机 WinSxS 104,466 文件约 5 秒；`--elevate` 通过 UAC 只提升只读分析子进程，结果用 `--merge` 合并，报告段没有删除按钮。
   - 分页/交换/休眠文件改为**逐盘探测**（`by_drive`）：此前只测 `C:`，把唯一压在 `F:` 上的 20.99 GB 分页文件报成 256 MB；
   - 新增 `wsl_vhdx` 项（`%LOCALAPPDATA%\wsl`、`Docker\wsl`、`Packages\*LocalState`），并写明 vhdx 只增不减、压缩要导出/注销/重导、`--set-sparse` 对存量块无效；
@@ -180,7 +181,7 @@ pills 只渲染解析出的纯数字（如"约 5.5 GB"），不显示数据里�
   - 新增 `ide_caches` 分组（JetBrains 各产品的 `index`/`caches`/`jcef_cache`/`log`/`tmp`）；`dev_caches` 补 pnpm 全局 store 与 metadata 缓存；
   - 服务端补父/子路径重叠拒绝、`SHFileOperationW`/Finder 取消识别（`fAnyOperationsAborted`、`-128`）、操作后校验目标仍存在，并逐路径返回 `completed`/`already_missing`/`partial`/`not_attempted`；
   - 报告页重做：单层样式、总宽 940px、条目清单化（一块白卡 + 细分隔线）、默认折叠，概览只留三个数字与一条分段尺；文案改成日常说法（「能直接清 / 要你拿主意 / 别手动删」「移到回收站后空间不会立刻回来」），系统段显示逐盘明细与虚拟磁盘清单；
-  - 真机回归：`python -m unittest discover -s scripts` 70 项通过 + `node scripts/test_report_runtime.js assets/report_template.html` 通过（含合成夹具下的回收站逐盘、JetBrains 缓存、跨盘分页文件、vhdx 用例）。
+  - 真机回归：`python -m unittest discover -s scripts` 84 项通过（1 项 macOS 跳过）+ `node scripts/test_report_runtime.js assets/report_template.html` 通过（含合成夹具下的回收站逐盘、JetBrains 缓存、跨盘分页文件、vhdx 用例）。
 - **Windows agent 后台拉起 server.py**：bash 管道下 stdio 句柄继承会让启动命令挂死，用 `Invoke-CimMethod Win32_Process Create` 完全脱离，再读 `<analysis>.server-url.txt` 拿 URL。
 
 Windows 侧的问题在 [jidekaixin2dian/storage-analyzer](https://github.com/jidekaixin2dian/storage-analyzer) 提 issue —— 本仓库是这个 skill 的实际维护分支（见「来源与维护声明」）。
